@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Platform API. One endpoint, GET /platform/info, that returns the infrastructure
+  configuration Terraform published to SSM under /platform/<stage>/ — proof that
+  the SSM bridge works end to end, and the pattern every SAM application copies.
+
+# Every value comes from the SSM bridge (infrastructure/modules/platform-resources)
+# as an AWS::SSM::Parameter::Value<String> parameter, resolved at deploy time. The
+# paths are in deployments/<stage>.json, so the template never names a stage; a
+# missing parameter fails the change set, before anything is deployed.
+
+Parameters:
+  Stage:
+    Type: String
+    AllowedValues: [dev, production]
+  VpcId:
+    Type: AWS::SSM::Parameter::Value<String>
+  PrivateSubnetIds:
+    Type: AWS::SSM::Parameter::Value<String>
+  PublicSubnetIds:
+    Type: AWS::SSM::Parameter::Value<String>
+  LambdaSecurityGroupId:
+    Type: AWS::SSM::Parameter::Value<String>
+  VpcLinkSecurityGroupId:
+    Type: AWS::SSM::Parameter::Value<String>
+  VpcLinkId:
+    Type: AWS::SSM::Parameter::Value<String>
+  HostedZoneId:
+    Type: AWS::SSM::Parameter::Value<String>
+  DomainName:
+    Type: AWS::SSM::Parameter::Value<String>
+  CertificateArn:
+    Type: AWS::SSM::Parameter::Value<String>
+  AppConfigApplicationId:
+    Type: AWS::SSM::Parameter::Value<String>
+  AppConfigEnvironmentId:
+    Type: AWS::SSM::Parameter::Value<String>
+  AppConfigConfigurationProfileId:
+    Type: AWS::SSM::Parameter::Value<String>
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [arm64]
+    Timeout: 10
+    MemorySize: 128
+    Tracing: Active
+
+Resources:
+  PlatformInfoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Returns the platform's infrastructure configuration
+      CodeUri: src/
+      Handler: app.handler
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+          POWERTOOLS_SERVICE_NAME: platform-api
+          POWERTOOLS_LOG_LEVEL: INFO
+          VPC_ID: !Ref VpcId
+          PRIVATE_SUBNET_IDS: !Ref PrivateSubnetIds
+          PUBLIC_SUBNET_IDS: !Ref PublicSubnetIds
+          LAMBDA_SECURITY_GROUP_ID: !Ref LambdaSecurityGroupId
+          VPC_LINK_SECURITY_GROUP_ID: !Ref VpcLinkSecurityGroupId
+          VPC_LINK_ID: !Ref VpcLinkId
+          HOSTED_ZONE_ID: !Ref HostedZoneId
+          DOMAIN_NAME: !Ref DomainName
+          CERTIFICATE_ARN: !Ref CertificateArn
+          APPCONFIG_APPLICATION_ID: !Ref AppConfigApplicationId
+          APPCONFIG_ENVIRONMENT_ID: !Ref AppConfigEnvironmentId
+          APPCONFIG_CONFIGURATION_PROFILE_ID: !Ref AppConfigConfigurationProfileId
+      Events:
+        PlatformInfo:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /platform/info
+
+  PlatformInfoLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${PlatformInfoFunction}"
+      RetentionInDays: 30
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Description: !Sub "Platform API (${Stage})"
+
+Outputs:
+  HttpApiUrl:
+    Description: Base URL of the platform API
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"

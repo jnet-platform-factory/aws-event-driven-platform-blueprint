@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# changeset: create, and describe, a change set that puts the stack at
+# SAR_VERSION with the parameters in PARAMS. Executes nothing.
+#
+# The template is SAR's own (create-cloud-formation-template), so the code and
+# the template are exactly the published version. The change set itself is
+# created by ../../bin/cfn-changeset with CloudFormation rather than
+# `serverlessrepo create-cloud-formation-change-set`, because only CloudFormation
+# takes a --role-arn: the stack's resources are then created by EXEC_ROLE, not by
+# whoever runs this. The serverlessrepo tags SAR would have set are set here.
+#
+# An existing stack must be tagged with SAR_APP_ID, or this is about to rewrite
+# something else.
+#
+# Environment: AWS (the aws command, region set), SAR_APP_ID, SAR_VERSION, STACK,
+# ACCOUNT_ID, EXEC_ROLE, PARAMS, CHANGE_SET, and optionally DESCRIPTION and
+# ALLOW_DESTRUCTIVE=1.
+
+set -euo pipefail
+: "${AWS:?}" "${SAR_APP_ID:?}" "${SAR_VERSION:?}" "${STACK:?}" "${ACCOUNT_ID:?}" "${EXEC_ROLE:?}" "${PARAMS:?}" "${CHANGE_SET:?}"
+read -r -a aws <<<"${AWS}"
+here="$(cd "$(dirname "$0")" && pwd)"
+die() { echo "error: $*" >&2; exit 1; }
+
+if tags="$("${aws[@]}" cloudformation describe-stacks --stack-name "${STACK}" --query 'Stacks[0].Tags' --output json 2>/dev/null)"; then
+  app="$(jq -r '.[] | select(.Key == "serverlessrepo:applicationId") | .Value' <<<"${tags}")"
+  [[ "${app}" == "${SAR_APP_ID}" ]] ||
+    die "${STACK} is tagged serverlessrepo:applicationId=${app:-<none>}, not this product's application"
+  from="$(jq -r '.[] | select(.Key == "serverlessrepo:semanticVersion") | .Value' <<<"${tags}")"
+  echo "${STACK}: SAR ${from:-?} -> ${SAR_VERSION}"
+else
+  tags='[]'
+  echo "${STACK}: new stack at SAR ${SAR_VERSION}"
+fi
+
+echo "Asking SAR for the ${SAR_VERSION} template"
+read -r template_id status url < <("${aws[@]}" serverlessrepo create-cloud-formation-template \
+  --application-id "${SAR_APP_ID}" --semantic-version "${SAR_VERSION}" \
+  --query '[TemplateId, Status, TemplateUrl]' --output text)
+for _ in $(seq 60); do
+  [[ "${status}" == ACTIVE ]] && break
+  [[ "${status}" == EXPIRED ]] && die "SAR template ${template_id} expired before it was ready"
+  sleep 5
+  read -r status url < <("${aws[@]}" serverlessrepo get-cloud-formation-template \
+    --application-id "${SAR_APP_ID}" --template-id "${template_id}" --query '[Status, TemplateUrl]' --output text)
+done
+[[ "${status}" == ACTIVE ]] || die "SAR template ${template_id} is still ${status} after 5 minutes"
+
+TAGS="$(jq -c --arg v "${SAR_VERSION}" --arg app "${SAR_APP_ID}" \
+  'map(select(.Key != "serverlessrepo:semanticVersion" and .Key != "serverlessrepo:applicationId"))
+   + [{Key: "serverlessrepo:applicationId", Value: $app}, {Key: "serverlessrepo:semanticVersion", Value: $v}]' <<<"${tags}")"
+
+TEMPLATE_URL="${url}" TAGS="${TAGS}" \
+CAPABILITIES="CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND" \
+LABEL="${STACK} (SAR ${SAR_VERSION})" DESCRIPTION="${DESCRIPTION:-SAR ${SAR_VERSION}}" \
+  exec "${here}/../../bin/cfn-changeset"

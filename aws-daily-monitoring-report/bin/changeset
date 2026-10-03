@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# changeset: build the pinned tool, package it, and create, and describe, a
+# change set that puts the stack at TOOL_REF with the parameters in PARAMS.
+# Executes nothing. The build, package and change set are ../../bin/sam-changeset's;
+# this adds the one check that is the tool's own.
+#
+# An existing stack must be this tool's: its DailyReportFunction must be the
+# function aws-daily-monitoring-report.
+#
+# Environment: AWS and SAM (the commands, with credentials), TOOL_DIR, TOOL_REF,
+# STACK, REGION, STAGE, ACCOUNT_ID, EXEC_ROLE, PARAMS, BUILD_DIR, CHANGE_SET, and
+# optionally DESCRIPTION and ALLOW_DESTRUCTIVE=1.
+
+set -euo pipefail
+: "${AWS:?}" "${TOOL_DIR:?}" "${TOOL_REF:?}" "${STACK:?}" "${STAGE:?}"
+read -r -a aws <<<"${AWS}"
+here="$(cd "$(dirname "$0")" && pwd)"
+die() { echo "error: $*" >&2; exit 1; }
+short="${TOOL_REF:0:10}"
+
+if "${aws[@]}" cloudformation describe-stacks --stack-name "${STACK}" >/dev/null 2>&1; then
+  read -r rtype fname < <("${aws[@]}" cloudformation describe-stack-resource --stack-name "${STACK}" \
+    --logical-resource-id DailyReportFunction \
+    --query 'StackResourceDetail.[ResourceType, PhysicalResourceId]' --output text 2>/dev/null) || true
+  # A stack still in REVIEW_IN_PROGRESS has no resources yet.
+  [[ -z "${rtype:-}" || "${rtype} ${fname}" == "AWS::Lambda::Function aws-daily-monitoring-report" ]] ||
+    die "${STACK}'s DailyReportFunction is ${rtype} ${fname}: not this tool's stack"
+fi
+
+SAM_TEMPLATE="${TOOL_DIR}/template.yaml" S3_PREFIX=aws-daily-monitoring-report \
+LABEL="${STACK} (${STAGE}, ${short})" DESCRIPTION="${DESCRIPTION:-aws-daily-monitoring-report ${short}}" \
+  exec "${here}/../../bin/sam-changeset"

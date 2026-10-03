@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""Apply the SSM parameters declared in ssm-parameters/ssm-parameters.json.
+
+Reconciles a declarative manifest against SSM Parameter Store one parameter at a
+time and reports CREATE / UPDATE / NO CHANGE / TYPE DRIFT for each. With
+--dry-run (what CI passes by default) nothing is written.
+
+Values come either from the manifest itself (`value`, for non-sensitive config
+checked into git) or from a process environment variable (`source_env`, for
+anything sensitive). Sensitive values are re-registered with ::add-mask:: before
+first use so they stay out of the Actions log even when they arrived through a
+GitHub *variable*, which Actions does not mask on its own.
+
+Writes go through `aws ssm put-parameter --cli-input-json`, never through argv:
+values may legitimately start with a dash or span multiple lines (PEM keys,
+service-account JSON) and argv-passing mangles both.
+
+Requires the `aws` CLI on PATH with credentials already configured — on the
+runner that is what aws-actions/configure-aws-credentials leaves behind.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+MANIFEST = REPO_ROOT / "ssm-parameters" / "ssm-parameters.json"
+
+VALID_TYPES = ("String", "StringList", "SecureString")
+ENVIRONMENTS = ("dev", "production")
+
+CREATE = "CREATE"
+UPDATE = "UPDATE"
+NO_CHANGE = "NO CHANGE"
+TYPE_DRIFT = "TYPE DRIFT"
+ERROR = "ERROR"
+
+# Below this length a mask is more harmful than useful: masking "24" turns every
+# incidental "24" in the log into ***. Short values are non-secret by nature.
+MIN_MASK_LENGTH = 8
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def mask(value: str) -> None:
+    """Register a value with the Actions log masker.
+
+    A multiline value has to be masked line by line — ::add-mask:: takes a
+    single line and would otherwise register a string that never appears in the
+    log verbatim. The whitespace-collapsed form is registered too, for tools
+    that flatten newlines on output.
+    """
+    candidates = {value, " ".join(value.split()), *value.splitlines()}
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if len(candidate) >= MIN_MASK_LENGTH and "\n" not in candidate:
+            log(f"::add-mask::{candidate}")
+
+
+def aws(args: list[str], region: str) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        ["aws", "--region", region, *args],
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def fetch_existing(name: str, region: str) -> tuple[dict | None, str | None]:
+    """Return (parameter, error). A missing parameter is (None, None)."""
+    rc, out, err = aws(["ssm", "get-parameter", "--name", name], region)
+    if rc != 0:
+        if "ParameterNotFound" in err:
+            return None, None
+        return None, err.strip().splitlines()[-1] if err.strip() else f"exit {rc}"
+
+    param = json.loads(out)["Parameter"]
+
+    # Only a SecureString needs the decrypting round trip, and that call needs
+    # kms:Decrypt — so don't spend it on the String parameters that are the
+    # common case here.
+    if param.get("Type") == "SecureString":
+        rc, out, err = aws(
+            ["ssm", "get-parameter", "--name", name, "--with-decryption"], region
+        )
+        if rc != 0:
+            return None, err.strip().splitlines()[-1] if err.strip() else f"exit {rc}"
+        param = json.loads(out)["Parameter"]
+
+    return param, None
+
+
+def put(name: str, value: str, type_: str, description: str | None, region: str) -> str | None:
+    """Write the parameter. Returns an error string, or None on success."""
+    payload: dict[str, object] = {
+        "Name": name,
+        "Value": value,
+        "Type": type_,
+        "Overwrite": True,
+    }
+    if description:
+        payload["Description"] = description
+
+    # A temp file keeps the value out of both argv and the shell. The runner is
+    # ephemeral, and the file is removed either way.
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    )
+    try:
+        os.chmod(handle.name, 0o600)
+        json.dump(payload, handle)
+        handle.close()
+        rc, _, err = aws(
+            ["ssm", "put-parameter", "--cli-input-json", f"file://{handle.name}"], region
+        )
+    finally:
+        os.unlink(handle.name)
+
+    if rc != 0:
+        return err.strip().splitlines()[-1] if err.strip() else f"exit {rc}"
+    return None
+
+
+def resolve(entry: dict, environment: str) -> tuple[str, str, str, str | None]:
+    """Validate one manifest entry and resolve it. Raises ValueError."""
+    name = entry.get("name")
+    if not name:
+        raise ValueError("entry has no 'name'")
+    name = name.replace("{environment}", environment)
+
+    type_ = entry.get("type")
+    if type_ not in VALID_TYPES:
+        raise ValueError(f"{name}: type must be one of {', '.join(VALID_TYPES)}, got {type_!r}")
+
+    has_value = "value" in entry
+    source_env = entry.get("source_env")
+    if has_value == bool(source_env):
+        raise ValueError(f"{name}: set exactly one of 'value' or 'source_env'")
+
+    if has_value:
+        value = str(entry["value"])
+    else:
+        value = os.environ.get(source_env, "")
+        if not value:
+            raise ValueError(
+                f"{name}: ${source_env} is unset or empty. Add it to the "
+                f"{environment} environment in GitHub and map it in the "
+                f"workflow's env: block."
+            )
+        mask(value)
+
+    return name, value, type_, entry.get("description")
+
+
+def check(entries: list, environment: str) -> int:
+    """Validate every entry's shape without reading a value. Returns an exit code."""
+    problems = 0
+    names = []
+    for entry in entries:
+        name = str(entry.get("name", "?"))
+        names.append(name)
+        if not name.startswith("/") or "{environment}" not in name:
+            log(f"  FAIL  {name}: the name must be a full path containing {{environment}}")
+            problems += 1
+        type_ = entry.get("type")
+        if type_ not in VALID_TYPES:
+            log(f"  FAIL  {name}: type must be one of {', '.join(VALID_TYPES)}, got {type_!r}")
+            problems += 1
+        if ("value" in entry) == bool(entry.get("source_env")):
+            log(f"  FAIL  {name}: set exactly one of 'value' or 'source_env'")
+            problems += 1
+        allowed = entry.get("environments")
+        if allowed is not None and not set(allowed) <= set(ENVIRONMENTS):
+            log(f"  FAIL  {name}: environments must be among {', '.join(ENVIRONMENTS)}")
+            problems += 1
+    for name in {n for n in names if names.count(n) > 1}:
+        log(f"  FAIL  {name}: declared twice")
+        problems += 1
+    log(f"{len(entries)} parameter(s) declared; {problems} problem(s)")
+    return 1 if problems else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--environment", required=True, choices=ENVIRONMENTS)
+    parser.add_argument(
+        "--region",
+        default=os.environ.get("AWS_REGION"),
+        help="defaults to $AWS_REGION; required when that is unset",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would change and write nothing",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=MANIFEST,
+        help=f"defaults to {MANIFEST.relative_to(REPO_ROOT)}",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate the manifest only: no AWS, no values read",
+    )
+    args = parser.parse_args()
+
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+
+    if args.check:
+        return check(manifest.get("parameters", []), args.environment)
+    if not args.region:
+        parser.error("--region is required when $AWS_REGION is unset")
+    entries = manifest.get("parameters", [])
+
+    mode = "DRY RUN — nothing will be written" if args.dry_run else "APPLYING"
+    log(f"{mode} · environment={args.environment} · region={args.region}")
+    log(f"{len(entries)} parameter(s) declared in {args.manifest.relative_to(REPO_ROOT)}\n")
+
+    results: list[tuple[str, str, str]] = []  # (name, status, detail)
+    failed = False
+
+    for entry in entries:
+        allowed = entry.get("environments")
+        if allowed and args.environment not in allowed:
+            name = str(entry.get("name", "?")).replace("{environment}", args.environment)
+            log(f"  SKIP       {name}  (scoped to {', '.join(allowed)})")
+            continue
+
+        try:
+            name, value, type_, description = resolve(entry, args.environment)
+        except ValueError as exc:
+            log(f"::error::{exc}")
+            results.append((str(entry.get("name", "?")), ERROR, str(exc)))
+            failed = True
+            continue
+
+        existing, err = fetch_existing(name, args.region)
+        if err:
+            log(f"::error::{name}: could not read the current value — {err}")
+            results.append((name, ERROR, f"read failed: {err}"))
+            failed = True
+            continue
+
+        if existing is None:
+            status, detail = CREATE, "does not exist yet"
+        elif existing.get("Type") != type_:
+            # put-parameter cannot change a parameter's type, with or without
+            # --overwrite. Recreating it is a deliberate act: it breaks every
+            # reader in between, so this reports and refuses.
+            status = TYPE_DRIFT
+            detail = f"is {existing.get('Type')} in AWS, manifest says {type_}"
+        elif existing.get("Value") == value:
+            status, detail = NO_CHANGE, f"version {existing.get('Version')}"
+        else:
+            status, detail = UPDATE, f"value differs from version {existing.get('Version')}"
+
+        if status == TYPE_DRIFT:
+            log(f"::error::{name}: {detail}. Delete it by hand, then re-run.")
+            failed = True
+        elif status == NO_CHANGE:
+            log(f"  {status:<10} {name}  ({detail})")
+        elif args.dry_run:
+            log(f"  {status:<10} {name}  ({detail})")
+        else:
+            put_err = put(name, value, type_, description, args.region)
+            if put_err:
+                log(f"::error::{name}: write failed — {put_err}")
+                status, detail = ERROR, f"write failed: {put_err}"
+                failed = True
+            else:
+                log(f"  {status:<10} {name}  (written)")
+
+        results.append((name, status, detail))
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        lines = [
+            f"### SSM parameters → {args.environment}",
+            "",
+            f"{'Dry run — nothing written.' if args.dry_run else 'Applied.'} "
+            f"Region `{args.region}`.",
+            "",
+            "| Parameter | Result | Detail |",
+            "|---|---|---|",
+        ]
+        for name, status, detail in results:
+            lines.append(f"| `{name}` | {status} | {detail} |")
+        if args.dry_run and any(s in (CREATE, UPDATE) for _, s, _ in results):
+            lines += ["", "Re-dispatch with **dry_run = false** to apply these."]
+        with open(summary_path, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+
+    changed = sum(1 for _, s, _ in results if s in (CREATE, UPDATE))
+    log(
+        f"\n{changed} parameter(s) "
+        f"{'would change' if args.dry_run else 'changed'}, "
+        f"{sum(1 for _, s, _ in results if s == NO_CHANGE)} already current."
+    )
+
+    if failed:
+        log("::error::One or more parameters could not be reconciled.")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

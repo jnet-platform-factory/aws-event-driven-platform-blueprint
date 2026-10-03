@@ -1,0 +1,103 @@
+name: ssm-parameters
+
+# The SSM parameters declared in ssm-parameters/ssm-parameters.json, with the
+# bootstrap's platform-deploy-role, in the GitHub environment of the same name.
+#
+#   PR     check, then plan dev (what would change; writes nothing)
+#   main   check, apply dev; then plan and apply production behind its reviewers
+#
+# Sensitive values come from GitHub environment *secrets*, mapped onto each
+# entry's source_env in the env: blocks below — never interpolated into a run:
+# command, and never from variables, which Actions does not mask.
+
+on:
+  pull_request:
+    paths:
+      - ssm-parameters/**
+      - .github/workflows/ssm-parameters.yml
+  push:
+    branches: [main]
+    paths:
+      - ssm-parameters/**
+      - .github/workflows/ssm-parameters.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (no AWS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C ssm-parameters check
+
+  dev:
+    name: dev ${{ github.event_name == 'pull_request' && 'plan' || 'apply' }}
+    needs: [check]
+    # The blueprint itself deploys nothing: only a repository rendered from it does.
+    if: github.repository != 'jnet-platform-factory/platform-blueprint'
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: ssm-parameters-dev
+      cancel-in-progress: false
+    # Map each source_env in ssm-parameters.json onto a secret of this
+    # environment, one line each:
+    # env:
+    #   PAYMENTS_API_KEY: ${{ secrets.PAYMENTS_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: make -C ssm-parameters plan ENV=dev
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: make -C ssm-parameters apply ENV=dev
+
+  production:
+    name: production apply
+    needs: [dev]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository != 'jnet-platform-factory/platform-blueprint'
+    runs-on: ubuntu-latest
+    # Required reviewers, main only.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: ssm-parameters-production
+      cancel-in-progress: false
+    # The same env: block as the dev job.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: make -C ssm-parameters plan ENV=production
+      - run: make -C ssm-parameters apply ENV=production
+
+  # A job of its own: the action is pinned to a movable tag in another org, so
+  # it runs where no token or credential is.
+  summary:
+    name: Summary
+    needs: [check, dev, production]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Summary
+        continue-on-error: true
+        uses: jnet-platform-factory/.github/actions/job-summary@v0.0.1
+        with:
+          title: ssm-parameters
+          needs: ${{ toJSON(needs) }}
+          rows: |
+            Trigger: ${{ github.event_name }}
+            Commit: ${{ github.sha }}

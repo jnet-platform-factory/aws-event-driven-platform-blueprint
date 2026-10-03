@@ -1,0 +1,161 @@
+name: aws-account-bootstrap
+
+# plan, analyze and diff for both accounts on every PR that touches the
+# bootstrap and every Monday; apply on demand, behind a reviewer.
+#
+# Roles come from aws-account-bootstrap/ci-roles/, which a human deploys once per
+# account: __PREFIX__-platform-bootstrap-readonly (environment
+# bootstrap-<account>-plan) and __PREFIX__-platform-bootstrap-apply (environment
+# bootstrap-<account>, which needs a reviewer and only allows main). See
+# aws-account-bootstrap/README.md.
+
+on:
+  pull_request:
+    paths:
+      - aws-account-bootstrap/**
+      - .github/workflows/aws-account-bootstrap.yml
+  schedule:
+    # Drift: diff fails when live IAM no longer matches what apply would write.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      account:
+        description: Account to plan, and to apply if asked
+        required: true
+        type: choice
+        options: [dev, production]
+      apply:
+        description: Apply after the plan (main only; waits for the bootstrap-<account> reviewer)
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-account-bootstrap-${{ github.event_name == 'workflow_dispatch' && inputs.account || github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The accounts are also on the first line of each config; bin/diff-live checks
+  # the credentials against it.
+  ACCOUNT_IDS: '{"dev": "__DEV_ACCOUNT_ID__", "production": "__PRODUCTION_ACCOUNT_ID__"}'
+  AWS_REGION: __PRIMARY_REGION__
+
+jobs:
+  static:
+    name: Pin, configs, scripts (no AWS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-tools
+        with:
+          lint: "true"
+      - working-directory: aws-account-bootstrap
+        run: |
+          make verify-pin
+          make check
+
+  plan:
+    name: Plan ${{ matrix.account }}
+    needs: [static]
+    # The blueprint itself deploys nothing: only a repository rendered from it does.
+    if: github.repository != 'jnet-platform-factory/platform-blueprint'
+    runs-on: ubuntu-latest
+    environment: bootstrap-${{ matrix.account }}-plan
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        account: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.account)) || fromJSON('["dev", "production"]') }}
+    env:
+      ACCOUNT: ${{ matrix.account }}
+      # Read access to every configured repo's OIDC subject setting: the trust
+      # policies are rendered from it, and make github-oidc refuses to go on without it.
+      GH_TOKEN: ${{ secrets.CICD_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ fromJSON(env.ACCOUNT_IDS)[matrix.account] }}:role/__PREFIX__-platform-bootstrap-readonly
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Plan
+        working-directory: aws-account-bootstrap
+        run: make plan ACCOUNT="$ACCOUNT" </dev/null
+
+      - name: Analyze
+        working-directory: aws-account-bootstrap
+        run: make analyze ACCOUNT="$ACCOUNT"
+
+      - name: Diff against live
+        working-directory: aws-account-bootstrap
+        run: |
+          set -o pipefail
+          make diff ACCOUNT="$ACCOUNT" | tee "$RUNNER_TEMP/diff.txt"
+
+      - name: Diff in the summary
+        if: always()
+        run: |
+          [ -f "$RUNNER_TEMP/diff.txt" ] || exit 0
+          {
+            echo "### $ACCOUNT: rendered documents against live IAM"
+            echo
+            echo '```diff'
+            cat "$RUNNER_TEMP/diff.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Apply ${{ inputs.account }}
+    needs: [plan]
+    if: github.event_name == 'workflow_dispatch' && inputs.apply && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Required reviewers, main only. Approve after reading the plan job above.
+    environment: bootstrap-${{ inputs.account }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ACCOUNT: ${{ inputs.account }}
+      GH_TOKEN: ${{ secrets.CICD_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ fromJSON(env.ACCOUNT_IDS)[inputs.account] }}:role/__PREFIX__-platform-bootstrap-apply
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Refused while the account is in NO_APPLY in aws-account-bootstrap/Makefile.
+      - name: Apply
+        working-directory: aws-account-bootstrap
+        run: make apply ACCOUNT="$ACCOUNT" YES=1 </dev/null
+
+      - name: Diff against live (must be clean)
+        working-directory: aws-account-bootstrap
+        run: make diff ACCOUNT="$ACCOUNT"
+
+  # A job of its own: the action is pinned to a movable tag in another org, so
+  # it runs where no token or credential is.
+  summary:
+    name: Summary
+    needs: [static, plan, apply]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Summary
+        continue-on-error: true
+        uses: jnet-platform-factory/.github/actions/job-summary@v0.0.1
+        with:
+          title: aws-account-bootstrap — ${{ github.event_name == 'workflow_dispatch' && inputs.account || 'dev, production' }}
+          needs: ${{ toJSON(needs) }}
+          rows: |
+            Trigger: ${{ github.event_name }}
+            Apply: ${{ github.event_name == 'workflow_dispatch' && inputs.apply && needs.apply.result || 'not asked' }}
+            Commit: ${{ github.sha }}

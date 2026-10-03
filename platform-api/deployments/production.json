@@ -1,0 +1,54 @@
+[
+  {
+    "ParameterKey": "AppConfigApplicationId",
+    "ParameterValue": "/platform/production/appconfig_application_id"
+  },
+  {
+    "ParameterKey": "AppConfigConfigurationProfileId",
+    "ParameterValue": "/platform/production/appconfig_configuration_profile_id"
+  },
+  {
+    "ParameterKey": "AppConfigEnvironmentId",
+    "ParameterValue": "/platform/production/appconfig_environment_id"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": "/platform/production/certificate_arn"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "/platform/production/domain_name"
+  },
+  {
+    "ParameterKey": "HostedZoneId",
+    "ParameterValue": "/platform/production/hosted_zone_id"
+  },
+  {
+    "ParameterKey": "LambdaSecurityGroupId",
+    "ParameterValue": "/platform/production/lambda_security_group_id"
+  },
+  {
+    "ParameterKey": "PrivateSubnetIds",
+    "ParameterValue": "/platform/production/private_subnet_ids"
+  },
+  {
+    "ParameterKey": "PublicSubnetIds",
+    "ParameterValue": "/platform/production/public_subnet_ids"
+  },
+  {
+    "ParameterKey": "Stage",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "/platform/production/vpc_id"
+  },
+  {
+    "ParameterKey": "VpcLinkId",
+    "ParameterValue": "/platform/production/vpc_link_id"
+  },
+  {
+    "ParameterKey": "VpcLinkSecurityGroupId",
+    "ParameterValue": "/platform/production/vpc_link_security_group_id"
+  }
+]

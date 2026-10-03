@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# github-oidc <config>: fail unless gh can read the OIDC subject setting of every
+# repository the config's trust policies name. No AWS.
+#
+# The tool's lib/render.py looks that setting up to decide which `sub` forms to
+# trust, and when the lookup fails, for any reason, it quietly trusts only the
+# repo:<org>/<repo> form. A repository with immutable subject claims on would then
+# have every one of its tokens refused by a plan or apply rendered after a failed
+# lookup. This makes the lookup's failure loud, before anything renders.
+
+set -euo pipefail
+
+config="${1:?usage: github-oidc <config>}"
+value() { sed -n "s/^$1=\"\(.*\)\"$/\1/p" "${config}"; }
+
+org="$(value GITHUB_ORG)"
+# shellcheck disable=SC2046  # the lists are space-separated on purpose
+repos="$(printf '%s\n' $(value PLATFORM_REPOS) $(value APP_REPOS) | sort -u)"
+[[ -n "${org}" && -n "${repos}" ]] || { echo "$(basename "${config}"): GITHUB_ORG and PLATFORM_REPOS must be set"; exit 1; }
+
+command -v gh >/dev/null || { echo "the gh CLI is required: the trust policies depend on what it reads"; exit 1; }
+
+failures=0
+for repo in ${repos}; do
+  if setting="$(gh api "repos/${org}/${repo}/actions/oidc/customization/sub" 2>&1)"; then
+    form="$(jq -r 'if .use_immutable_subject then "repo:<org>/<repo> and " + .sub_claim_prefix else "repo:<org>/<repo> only" end' <<<"${setting}")"
+    echo "  ${org}/${repo}: trusts ${form}"
+  else
+    echo "  ${org}/${repo}: cannot read its OIDC subject setting: ${setting}"
+    failures=$((failures + 1))
+  fi
+done
+
+if (( failures )); then
+  echo "refusing to render: the trust policies would silently drop the immutable subject form"
+  exit 1
+fi

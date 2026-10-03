@@ -1,0 +1,415 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Platform CI roles: what the platform repository's own workflows assume in this
+  account for the account bootstrap and for events-observability. Deployed by a
+  human with `make ci-roles ACCOUNT=<account>`, never by CI, and never by
+  aws-account-bootstrap: a bad bootstrap apply must not be able to lock out the
+  pipeline that would fix it. See ../README.md.
+
+# Every role trusts one GitHub environment of the platform repository, in both
+# forms of the OIDC subject: repo:<org>/<repo> and, for a repository with
+# immutable subject claims on, repo:<org>@<org id>/<repo>@<repo id>.
+#
+# The OIDC provider is the one aws-account-bootstrap creates. The bootstrap only
+# ever creates it when missing, so applying the bootstrap cannot remove it; deploy
+# this stack after the account's first bootstrap apply.
+#
+# Everything else the platform repository deploys (Terragrunt, SSM parameters,
+# platform-api, the base layer, the daily monitoring report) uses the roles the
+# bootstrap itself creates, through the dev / production GitHub environments.
+# events-observability is the exception: its template comes from the Serverless
+# Application Repository, which the bootstrap's app role cannot read.
+
+Parameters:
+  Account:
+    Type: String
+    AllowedValues: [dev, production]
+    Description: The aws-account-bootstrap ACCOUNT this is; names the GitHub environments.
+  Prefix:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{1,20}$"
+    Description: The tenant's resource prefix. Names every role here and scopes events-observability.
+  GitHubOrg:
+    Type: String
+  GitHubOrgId:
+    Type: String
+    AllowedPattern: "^[0-9]+$"
+  GitHubRepo:
+    Type: String
+  GitHubRepoId:
+    Type: String
+    AllowedPattern: "^[0-9]+$"
+  EventsObservability:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: Create the events-observability roles.
+  EventsObservabilityRegion:
+    Type: String
+    Description: Region of the events-observability stack.
+  SarPublisherAccountId:
+    Type: String
+    AllowedPattern: "^[0-9]{12}$"
+    Description: The account that publishes the events-observability SAR application.
+  SarApplicationName:
+    Type: String
+    Default: AWS-EventBridge-Firehose-OpenSearch-Forwarder
+
+Conditions:
+  WithEventsObservability: !Equals [!Ref EventsObservability, "true"]
+
+Resources:
+  # --- aws-account-bootstrap ----------------------------------------------------
+
+  # plan, check and diff: reads IAM, validates policies. Changes nothing.
+  BootstrapReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-platform-bootstrap-readonly"
+      Description: Platform CI, aws-account-bootstrap plan/check/diff. Read-only.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:bootstrap-${Account}-plan"
+                  - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:bootstrap-${Account}-plan"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/IAMReadOnlyAccess"
+        - !Ref BootstrapCheckPolicy
+
+  # What check-policy.sh calls besides reads. Neither changes anything.
+  BootstrapCheckPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Prefix}-platform-bootstrap-check"
+      Description: Access Analyzer validation and the IAM policy simulator, for aws-account-bootstrap check.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ValidateAndSimulate
+            Effect: Allow
+            Action:
+              - access-analyzer:ValidatePolicy
+              - iam:SimulateCustomPolicy
+            Resource: "*"
+
+  # apply: creates and rewrites exactly what aws-account-bootstrap owns. Only
+  # reachable from the protected bootstrap-<account> environment.
+  BootstrapApplyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-platform-bootstrap-apply"
+      Description: Platform CI, aws-account-bootstrap apply. Behind a required reviewer.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:bootstrap-${Account}"
+                  - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:bootstrap-${Account}"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/IAMReadOnlyAccess"
+        - !Ref BootstrapCheckPolicy
+      Policies:
+        # The names are the ones in ../configs/*.env, which are never renamed in
+        # place (see ../README.md). Change both together if they ever are.
+        - PolicyName: bootstrap-apply
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BootstrapRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:TagRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/platform-deploy-role"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/app-deploy-role"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/app-cfn-exec-role"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/lambda-test-role"
+              - Sid: BootstrapPolicies
+                Effect: Allow
+                Action:
+                  - iam:CreatePolicy
+                  - iam:TagPolicy
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/platform-deploy-policy"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/app-deploy-policy"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/app-cfn-exec-policy"
+              # Created only when missing; this role can never delete or change it.
+              - Sid: OidcProvider
+                Effect: Allow
+                Action:
+                  - iam:CreateOpenIDConnectProvider
+                  - iam:TagOpenIDConnectProvider
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+
+  # --- events-observability -----------------------------------------------------
+
+  # Creates, reads and deletes change sets on the stack. Cannot execute one: PR
+  # runs use this role, from an environment with no reviewer.
+  EventsObservabilityChangeSetPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: WithEventsObservability
+    Properties:
+      ManagedPolicyName: !Sub "${Prefix}-platform-eo-changeset"
+      Description: Create and inspect change sets on the events-observability stack.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SarTemplate
+            Effect: Allow
+            Action:
+              - serverlessrepo:GetApplication
+              - serverlessrepo:CreateCloudFormationTemplate
+              - serverlessrepo:GetCloudFormationTemplate
+            Resource: !Sub "arn:${AWS::Partition}:serverlessrepo:${EventsObservabilityRegion}:${SarPublisherAccountId}:applications/${SarApplicationName}"
+          - Sid: StackChangeSets
+            Effect: Allow
+            Action:
+              - cloudformation:CreateChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:ListChangeSets
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+            Resource: !Sub "arn:${AWS::Partition}:cloudformation:${EventsObservabilityRegion}:${AWS::AccountId}:stack/${Prefix}-events-observability-*/*"
+          - Sid: TemplateSummary
+            Effect: Allow
+            Action: cloudformation:GetTemplateSummary
+            Resource: "*"
+          - Sid: SamTransform
+            Effect: Allow
+            Action: cloudformation:CreateChangeSet
+            Resource: !Sub "arn:${AWS::Partition}:cloudformation:${EventsObservabilityRegion}:aws:transform/Serverless-2016-10-31"
+          - Sid: PassExecRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt EventsObservabilityExecRole.Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService: cloudformation.amazonaws.com
+
+  EventsObservabilityChangeSetRole:
+    Type: AWS::IAM::Role
+    Condition: WithEventsObservability
+    Properties:
+      RoleName: !Sub "${Prefix}-platform-eo-changeset"
+      Description: Platform CI, events-observability change sets. Cannot execute them.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:eo-${Account}-plan"
+                  - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:eo-${Account}-plan"
+      ManagedPolicyArns:
+        - !Ref EventsObservabilityChangeSetPolicy
+
+  # The change-set role plus ExecuteChangeSet. Only reachable from the protected
+  # eo-<account> environment.
+  EventsObservabilityExecuteRole:
+    Type: AWS::IAM::Role
+    Condition: WithEventsObservability
+    Properties:
+      RoleName: !Sub "${Prefix}-platform-eo-execute"
+      Description: Platform CI, events-observability execute. Behind a required reviewer.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:eo-${Account}"
+                  - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:eo-${Account}"
+      ManagedPolicyArns:
+        - !Ref EventsObservabilityChangeSetPolicy
+      Policies:
+        - PolicyName: execute-change-set
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:ExecuteChangeSet
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${EventsObservabilityRegion}:${AWS::AccountId}:stack/${Prefix}-events-observability-*/*"
+
+  # CloudFormation's service role for the stack: what the product's template
+  # creates, and nothing outside the tenant's names. The deployment record's
+  # NamePrefix is the tenant prefix, and SAM names the function roles after the
+  # stack. A new resource type in a later product version is denied at execute,
+  # and the stack rolls back, until it is added here.
+  EventsObservabilityExecRole:
+    Type: AWS::IAM::Role
+    Condition: WithEventsObservability
+    Properties:
+      RoleName: !Sub "${Prefix}-platform-eo-cfn-exec"
+      Description: CloudFormation service role for the events-observability stack.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: events-observability-resources
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SamTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${EventsObservabilityRegion}:aws:transform/Serverless-2016-10-31"
+              # SAR keeps the packaged code in its own buckets and grants the
+              # deploying account read access to it.
+              - Sid: SarCode
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::awsserverlessrepo-changesets-*/*"
+              - Sid: Regional
+                Effect: Allow
+                Action:
+                  - events:*
+                  - sqs:*
+                  - sns:*
+                  - lambda:*
+                  - firehose:*
+                  - logs:*
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
+                  - cloudwatch:ListTagsForResource
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:events:${EventsObservabilityRegion}:${AWS::AccountId}:event-bus/${Prefix}-*"
+                  - !Sub "arn:${AWS::Partition}:events:${EventsObservabilityRegion}:${AWS::AccountId}:rule/${Prefix}-*"
+                  - !Sub "arn:${AWS::Partition}:sqs:${EventsObservabilityRegion}:${AWS::AccountId}:${Prefix}-*"
+                  - !Sub "arn:${AWS::Partition}:sns:${EventsObservabilityRegion}:${AWS::AccountId}:${Prefix}-*"
+                  - !Sub "arn:${AWS::Partition}:lambda:${EventsObservabilityRegion}:${AWS::AccountId}:function:${Prefix}-*"
+                  - !Sub "arn:${AWS::Partition}:lambda:${EventsObservabilityRegion}:${AWS::AccountId}:event-source-mapping:*"
+                  - !Sub "arn:${AWS::Partition}:firehose:${EventsObservabilityRegion}:${AWS::AccountId}:deliverystream/${Prefix}-*"
+                  - !Sub "arn:${AWS::Partition}:logs:${EventsObservabilityRegion}:${AWS::AccountId}:log-group:/aws/lambda/${Prefix}-*"
+                  - !Sub "arn:${AWS::Partition}:logs:${EventsObservabilityRegion}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/${Prefix}-*"
+                  - !Sub "arn:${AWS::Partition}:cloudwatch:${EventsObservabilityRegion}:${AWS::AccountId}:alarm:${Prefix}-*"
+              # Calls that take no resource ARN (list, describe, and creating an
+              # event source mapping, whose ARN only exists afterwards).
+              - Sid: RegionalUnscoped
+                Effect: Allow
+                Action:
+                  - lambda:CreateEventSourceMapping
+                  - lambda:GetEventSourceMapping
+                  - lambda:ListEventSourceMappings
+                  - logs:DescribeLogGroups
+                  - sns:ListTopics
+                  - sqs:ListQueues
+                  - events:ListRules
+                  - firehose:ListDeliveryStreams
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref EventsObservabilityRegion
+              - Sid: SearchApi
+                Effect: Allow
+                Action: apigateway:*
+                Resource: !Sub "arn:${AWS::Partition}:apigateway:${EventsObservabilityRegion}::/apis*"
+              - Sid: FailedDocumentBucket
+                Effect: Allow
+                Action: s3:*
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${Prefix}-events-failed-*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${Prefix}-events-failed-*/*"
+              - Sid: StackRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:ListRoleTags
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Prefix}-*"
+              # SAM attaches AWS's Lambda service-role policies; nothing else.
+              - Sid: StackRolesManagedPolicies
+                Effect: Allow
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Prefix}-*"
+                Condition:
+                  ArnLike:
+                    iam:PolicyARN: !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/*"
+              - Sid: PassStackRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Prefix}-*"
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - lambda.amazonaws.com
+                      - firehose.amazonaws.com
+                      - events.amazonaws.com
+              # role/<prefix>-* would otherwise cover the CI roles themselves.
+              - Sid: NotTheCiRoles
+                Effect: Deny
+                Action: iam:*
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Prefix}-platform-*"
+
+Outputs:
+  BootstrapReadOnlyRoleArn:
+    Value: !GetAtt BootstrapReadOnlyRole.Arn
+  BootstrapApplyRoleArn:
+    Value: !GetAtt BootstrapApplyRole.Arn
+  EventsObservabilityChangeSetRoleArn:
+    Condition: WithEventsObservability
+    Value: !GetAtt EventsObservabilityChangeSetRole.Arn
+  EventsObservabilityExecuteRoleArn:
+    Condition: WithEventsObservability
+    Value: !GetAtt EventsObservabilityExecuteRole.Arn
+  EventsObservabilityExecRoleArn:
+    Condition: WithEventsObservability
+    Value: !GetAtt EventsObservabilityExecRole.Arn

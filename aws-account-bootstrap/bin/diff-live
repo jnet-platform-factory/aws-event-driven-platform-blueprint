@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# diff-live <tool-dir> <config>: compare every document aws-account-bootstrap
+# would apply with what is live in the account the current credentials are for.
+# Read-only. Exits 1 on any difference, so it is the drift gate that `plan`
+# (which always exits 0) is not.
+#
+# The documents are rendered by the pinned tool's own lib/render.py, from the
+# same config, so this compares exactly what `apply` would write. Both sides are
+# normalised first: keys sorted, single-item lists unwrapped, string lists
+# sorted. IAM treats all three as the same policy, and the live documents were
+# not all written by this build of the tool.
+#
+# For each role it also checks the attached managed policies: exactly the one
+# the bootstrap gives it, as `apply` would leave it.
+
+set -euo pipefail
+
+tool_dir="${1:?usage: diff-live <tool-dir> <config>}"
+config="${2:?usage: diff-live <tool-dir> <config>}"
+
+# The tool's loader and defaults, so names and lists are read exactly as it reads them.
+export BOOTSTRAP_ENV="${config}"
+# shellcheck source=/dev/null
+source "${tool_dir}/lib/config.sh"
+config_defaults
+
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)" || die "no AWS credentials"
+export ACCOUNT_ID
+grep -q "account ${ACCOUNT_ID}" <(head -1 "${config}") ||
+  die "the credentials are for account ${ACCOUNT_ID}, but $(basename "${config}") is for another: $(head -1 "${config}")"
+
+work="$(mktemp -d)"; trap 'rm -rf "${work}"' EXIT
+
+normalise() {  # normalise <file|-> : stdout, comparable
+  python3 -c '
+import json, sys
+
+def norm(node):
+    if isinstance(node, dict):
+        return {k: norm(v) for k, v in node.items()}
+    if isinstance(node, list):
+        items = [norm(v) for v in node]
+        if all(isinstance(v, str) for v in items):
+            items = sorted(set(items))
+        return items[0] if len(items) == 1 else items
+    return node
+
+src = sys.stdin if sys.argv[1] == "-" else open(sys.argv[1])
+print(json.dumps(norm(json.load(src)), indent=2, sort_keys=True))
+' "$1"
+}
+
+differences=0
+
+compare() {  # compare <label> <rendered-file> <live-file>
+  if diff -u --label "live: $1" --label "rendered: $1" \
+       <(normalise "$3") <(normalise "$2") > "${work}/diff"; then
+    echo "  identical    $1"
+  else
+    echo "  DIFFERENT    $1"
+    sed 's/^/      /' "${work}/diff"
+    differences=$((differences + 1))
+  fi
+}
+
+missing() { echo "  MISSING      $1"; differences=$((differences + 1)); }
+
+live_trust() {  # live_trust <role> > file ; false when the role does not exist
+  aws iam get-role --role-name "$1" --query Role.AssumeRolePolicyDocument --output json 2>/dev/null
+}
+
+live_permissions() {  # live_permissions <policy> > file ; the default version
+  local arn="arn:aws:iam::${ACCOUNT_ID}:policy/$1" version
+  version="$(aws iam get-policy --policy-arn "${arn}" --query Policy.DefaultVersionId --output text 2>/dev/null)" || return 1
+  aws iam get-policy-version --policy-arn "${arn}" --version-id "${version}" \
+    --query PolicyVersion.Document --output json
+}
+
+attached() {  # attached <role> <expected-arn>
+  local got
+  got="$(aws iam list-attached-role-policies --role-name "$1" \
+           --query 'AttachedPolicies[].PolicyArn' --output text | tr '\t' '\n' | sort)"
+  if [[ "${got}" == "$2" ]]; then
+    echo "  identical    $1 attached policies"
+  else
+    echo "  DIFFERENT    $1 attached policies: want only $2, have: ${got//$'\n'/ }"
+    differences=$((differences + 1))
+  fi
+}
+
+# check_role <role> <policy|-> <trust-render-args> <permissions-render-arg|->
+check_role() {
+  local role="$1" policy="$2" trust_kind="$3" trust_arg="$4" perm="$5"
+  render "${trust_kind}" "${trust_arg}" > "${work}/${role}.trust.json"
+  if live_trust "${role}" > "${work}/${role}.trust.live.json"; then
+    compare "${role} trust policy" "${work}/${role}.trust.json" "${work}/${role}.trust.live.json"
+  else
+    missing "role ${role}"
+    return
+  fi
+  if [[ "${policy}" != - ]]; then
+    render permissions "${perm}" > "${work}/${policy}.json"
+    if live_permissions "${policy}" > "${work}/${policy}.live.json"; then
+      compare "${policy} (default version)" "${work}/${policy}.json" "${work}/${policy}.live.json"
+    else
+      missing "policy ${policy}"
+    fi
+    attached "${role}" "arn:aws:iam::${ACCOUNT_ID}:policy/${policy}"
+  fi
+}
+
+echo "Account ${ACCOUNT_ID}: $(basename "${config}") against live"
+if aws iam get-open-id-connect-provider \
+     --open-id-connect-provider-arn "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_HOST}" >/dev/null 2>&1; then
+  echo "  identical    OIDC provider ${OIDC_HOST}"
+else
+  missing "OIDC provider ${OIDC_HOST}"
+fi
+
+check_role "${PLATFORM_ROLE_NAME}" "${PLATFORM_POLICY_NAME}" trust platform platform
+if [[ -n "${APP_REPOS}" ]]; then
+  check_role "${APP_EXEC_ROLE_NAME}" "${APP_EXEC_POLICY_NAME}" service-trust cloudformation app-exec
+  check_role "${APP_ROLE_NAME}" "${APP_POLICY_NAME}" trust app app
+fi
+if [[ -n "${LAMBDA_ROLE_NAME}" ]]; then
+  check_role "${LAMBDA_ROLE_NAME}" - service-trust lambda -
+  attached "${LAMBDA_ROLE_NAME}" "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+fi
+
+echo
+if (( differences )); then
+  echo "${differences} difference(s): apply would change the account"
+  exit 1
+fi
+echo "no differences: apply would change nothing in IAM"

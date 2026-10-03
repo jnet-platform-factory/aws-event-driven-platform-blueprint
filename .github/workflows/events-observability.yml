@@ -1,0 +1,98 @@
+name: events-observability
+
+# __PREFIX__-events-observability-<stage> (__EO_REGION__), deployed from the SAR
+# version pinned in events-observability/Makefile.
+#
+#   PR     check, then a change set per stage shown in the run summary and deleted
+#   main   check, then a change set per stage, each executed behind the
+#          eo-<stage> environment's reviewers. Approve after reading it.
+#
+# Roles come from aws-account-bootstrap/ci-roles/ (the bootstrap's app role
+# cannot read SAR): __PREFIX__-platform-eo-changeset (environment eo-<stage>-plan)
+# cannot execute; __PREFIX__-platform-eo-execute (environment eo-<stage>) can.
+# CloudFormation acts as __PREFIX__-platform-eo-cfn-exec.
+
+on:
+  pull_request:
+    paths:
+      - events-observability/**
+      - bin/**
+      - .github/workflows/events-observability.yml
+      - .github/workflows/cfn-changeset.yml
+  push:
+    branches: [main]
+    paths:
+      - events-observability/**
+      - bin/**
+      - .github/workflows/events-observability.yml
+      - .github/workflows/cfn-changeset.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (no AWS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C events-observability check
+
+  dev:
+    # The blueprint itself deploys nothing: only a repository rendered from it does.
+    if: github.repository != 'jnet-platform-factory/platform-blueprint'
+    needs: [check]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/cfn-changeset.yml
+    with:
+      component: events-observability
+      stage: dev
+      region: __EO_REGION__
+      plan_environment: eo-dev-plan
+      execute_environment: eo-dev
+      execute: ${{ github.event_name != 'pull_request' }}
+      changeset_role_arn: arn:aws:iam::__DEV_ACCOUNT_ID__:role/__PREFIX__-platform-eo-changeset
+      execute_role_arn: arn:aws:iam::__DEV_ACCOUNT_ID__:role/__PREFIX__-platform-eo-execute
+      sam: false
+
+  production:
+    if: github.repository != 'jnet-platform-factory/platform-blueprint'
+    needs: [check]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/cfn-changeset.yml
+    with:
+      component: events-observability
+      stage: production
+      region: __EO_REGION__
+      plan_environment: eo-production-plan
+      execute_environment: eo-production
+      execute: ${{ github.event_name != 'pull_request' }}
+      changeset_role_arn: arn:aws:iam::__PRODUCTION_ACCOUNT_ID__:role/__PREFIX__-platform-eo-changeset
+      execute_role_arn: arn:aws:iam::__PRODUCTION_ACCOUNT_ID__:role/__PREFIX__-platform-eo-execute
+      sam: false
+
+  # A job of its own: the action is pinned to a movable tag in another org, so
+  # it runs where no token or credential is.
+  summary:
+    name: Summary
+    needs: [check, dev, production]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Summary
+        continue-on-error: true
+        uses: jnet-platform-factory/.github/actions/job-summary@v0.0.1
+        with:
+          title: events-observability
+          needs: ${{ toJSON(needs) }}
+          rows: |
+            Trigger: ${{ github.event_name }}
+            dev change set: ${{ needs.dev.outputs.change_set }} (changes: ${{ needs.dev.outputs.changed }}, executed: ${{ needs.dev.outputs.executed }})
+            production change set: ${{ needs.production.outputs.change_set }} (changes: ${{ needs.production.outputs.changed }}, executed: ${{ needs.production.outputs.executed }})
+            Commit: ${{ github.sha }}

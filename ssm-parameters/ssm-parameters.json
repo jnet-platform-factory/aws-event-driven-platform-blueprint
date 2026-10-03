@@ -1,0 +1,24 @@
+{
+  "comment": [
+    "Declarative manifest of the SSM parameters applied by",
+    ".github/workflows/ssm-parameters.yml through bin/ssm-put-parameters.",
+    "",
+    "Fields per entry:",
+    "  name         (required) full SSM parameter path. `{environment}` is replaced",
+    "               with the environment (dev | production). Use /__PREFIX__/{environment}/...",
+    "  type         (required) String | StringList | SecureString",
+    "  value        literal value, checked into git - ONLY for non-sensitive config",
+    "  source_env   name of the environment variable holding the value (exclusive",
+    "               with 'value'). The workflow maps GitHub environment secrets onto",
+    "               these names in its env: block.",
+    "  description  optional, pushed to SSM for provenance",
+    "  environments optional allow-list, e.g. [\"dev\"]. Omit to apply to all.",
+    "",
+    "Type String for anything a SAM template reads through {{resolve:ssm:...}} or an",
+    "AWS::SSM::Parameter::Value<String> parameter: CloudFormation cannot resolve a",
+    "SecureString in either position.",
+    "",
+    "Not managed here: /platform/<env>/*, which infrastructure/ (Terraform) owns."
+  ],
+  "parameters": []
+}

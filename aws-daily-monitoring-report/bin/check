@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# check <params-file> <template> <slug>: no AWS.
+#
+#   - the parameter file passes ../../bin/check-params against the pinned template;
+#   - the values this repository relies on: both addresses set, one stack per
+#     account (no FunctionNameSuffix, which the Makefile's invoke and the stack
+#     identity check assume), and a snapshot slug that is the account's own, so no
+#     two stacks ever write the same object.
+
+set -euo pipefail
+
+params="${1:?usage: check <params-file> <template> <slug>}"
+template="${2:?}"; slug_want="${3:?}"
+here="$(cd "$(dirname "$0")" && pwd)"
+failures=0
+fail() { echo "  FAIL  $*"; failures=$((failures + 1)); }
+ok()   { echo "  ok    $*"; }
+
+"${here}/../../bin/check-params" "${params}" "${template}" || exit 1
+
+value() { jq -r --arg k "$1" '.[] | select(.ParameterKey == $k) | .ParameterValue' "${params}"; }
+
+for k in RecipientEmail SenderEmail; do
+  if [[ "$(value "${k}")" == ?*@?* ]]; then ok "${params}: ${k} is an address"; else fail "${params}: ${k} must be an email address"; fi
+done
+if [[ -z "$(value FunctionNameSuffix)" ]]; then ok "${params}: FunctionNameSuffix is empty: one stack in this account"
+else fail "${params}: FunctionNameSuffix must be empty: the Makefile assumes the function aws-daily-monitoring-report"; fi
+
+bucket="$(value SnapshotBucket)"; prefix="$(value SnapshotPrefix)"; slug="$(value SnapshotSlug)"
+if [[ -z "${bucket}" ]]; then
+  ok "${params}: SnapshotBucket is empty: email only"
+elif [[ "${slug}" == "${slug_want}" && "${prefix}" == */ ]]; then
+  ok "${params}: the snapshot is ${prefix}${slug}.json"
+else
+  fail "${params}: with SnapshotBucket set, SnapshotSlug must be '${slug_want}' and SnapshotPrefix must end with '/'"
+fi
+
+(( failures == 0 )) || { echo "${failures} problem(s)"; exit 1; }

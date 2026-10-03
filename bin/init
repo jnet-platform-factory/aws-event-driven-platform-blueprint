@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# init [answers-file]: turn a fresh copy of the blueprint into one tenant's
+# platform repository. No AWS. Run it once, in the new repository's checkout,
+# then review the diff and commit it.
+#
+#   1. reads the answers (default ./init.env; see init.env.example) and checks
+#      every one before anything is written;
+#   2. looks up the GitHub org and repository ids with gh when not given (the
+#      immutable OIDC subject needs them);
+#   3. removes the components not in COMPONENTS, with their workflows;
+#   4. replaces every __TOKEN__ in every text file, and in directory names;
+#   5. removes what only the blueprint needs (this script, its tests, the leak
+#      gate, the blueprint README) and puts README.tenant.md in README.md's place.
+#
+# What is left to fill in is marked CHANGEME; `make ready` lists it.
+
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+answers="${1:-${root}/init.env}"
+die() { echo "init: $*" >&2; exit 1; }
+
+[[ -f "${root}/init.env.example" ]] || die "this repository has already been initialised"
+[[ -f "${answers}" ]] || die "${answers} not found: copy init.env.example to init.env and fill it in"
+
+# The answers file is KEY="value" lines; read it without executing it.
+while IFS='=' read -r key value || [[ -n "${key}" ]]; do
+  [[ "${key}" =~ ^[A-Z_]+$ ]] || continue
+  value="${value%\"}"; value="${value#\"}"
+  printf -v "${key}" '%s' "${value}"
+done < <(grep -E '^[A-Z_]+=' "${answers}")
+
+ALL_COMPONENTS="aws-account-bootstrap infrastructure events-observability aws-daily-monitoring-report ssm-parameters platform-api lambda-layers"
+: "${TENANT:=}" "${PREFIX:=}" "${GITHUB_ORG:=}" "${PLATFORM_REPO:=}" "${PRIMARY_REGION:=}"
+: "${DEV_ACCOUNT_ID:=}" "${PRODUCTION_ACCOUNT_ID:=}" "${APP_REPOS:=}" "${GITHUB_ORG_ID:=}" "${PLATFORM_REPO_ID:=}"
+: "${SAR_PUBLISHER_ACCOUNT_ID:=}"
+: "${DEV_PROFILE:=${PREFIX}-dev}" "${PRODUCTION_PROFILE:=${PREFIX}-production}"
+: "${EO_REGION:=${PRIMARY_REGION}}" "${COMPONENTS:=${ALL_COMPONENTS}}"
+
+# --- 1. Check every answer --------------------------------------------------------
+problems=()
+want() { [[ "$2" =~ $3 ]] || problems+=("$1=\"$2\": $4"); }
+want TENANT "${TENANT}" '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}$' "a display name: letters, digits, space . _ -"
+want PREFIX "${PREFIX}" '^[a-z][a-z0-9-]{1,19}$' "lowercase, starts with a letter, 2-20 of a-z 0-9 -"
+want GITHUB_ORG "${GITHUB_ORG}" '^[A-Za-z0-9][A-Za-z0-9-]*$' "a GitHub organisation or user"
+want PLATFORM_REPO "${PLATFORM_REPO}" '^[A-Za-z0-9._-]+$' "this repository's name, without the org"
+want APP_REPOS "${APP_REPOS}" '^([A-Za-z0-9._-]+( [A-Za-z0-9._-]+)*)?$' "space-separated repository names, or empty"
+want PRIMARY_REGION "${PRIMARY_REGION}" '^[a-z]{2}(-[a-z]+)+-[0-9]$' "an AWS region, e.g. us-east-1"
+want EO_REGION "${EO_REGION}" '^[a-z]{2}(-[a-z]+)+-[0-9]$' "an AWS region, e.g. us-east-1"
+want DEV_ACCOUNT_ID "${DEV_ACCOUNT_ID}" '^[0-9]{12}$' "12 digits"
+want PRODUCTION_ACCOUNT_ID "${PRODUCTION_ACCOUNT_ID}" '^[0-9]{12}$' "12 digits"
+want DEV_PROFILE "${DEV_PROFILE}" '^[A-Za-z0-9._-]+$' "an aws-vault profile name"
+want PRODUCTION_PROFILE "${PRODUCTION_PROFILE}" '^[A-Za-z0-9._-]+$' "an aws-vault profile name"
+[[ "${DEV_ACCOUNT_ID}" != "${PRODUCTION_ACCOUNT_ID}" ]] ||
+  problems+=("DEV_ACCOUNT_ID and PRODUCTION_ACCOUNT_ID are the same: every environment needs its own account")
+
+selected() { [[ " ${COMPONENTS} " == *" $1 "* ]]; }
+for c in ${COMPONENTS}; do
+  [[ " ${ALL_COMPONENTS} " == *" ${c} "* ]] || problems+=("COMPONENTS: unknown component ${c} (known: ${ALL_COMPONENTS})")
+done
+selected aws-account-bootstrap || problems+=("COMPONENTS: aws-account-bootstrap is required, every pipeline uses its roles")
+if selected platform-api && ! selected infrastructure; then
+  problems+=("COMPONENTS: platform-api reads the SSM bridge, which infrastructure creates")
+fi
+if selected events-observability; then
+  want SAR_PUBLISHER_ACCOUNT_ID "${SAR_PUBLISHER_ACCOUNT_ID}" '^[0-9]{12}$' "the account that publishes the SAR application, 12 digits"
+  EVENTS_OBSERVABILITY=true
+else
+  SAR_PUBLISHER_ACCOUNT_ID="${SAR_PUBLISHER_ACCOUNT_ID:-000000000000}"
+  EVENTS_OBSERVABILITY=false
+fi
+
+# --- 2. The ids the immutable OIDC subject names ------------------------------------
+if [[ -z "${GITHUB_ORG_ID}" || -z "${PLATFORM_REPO_ID}" ]] && command -v gh >/dev/null; then
+  read -r looked_org looked_repo < <(gh api "repos/${GITHUB_ORG}/${PLATFORM_REPO}" --jq '"\(.owner.id) \(.id)"' 2>/dev/null) || true
+  GITHUB_ORG_ID="${GITHUB_ORG_ID:-${looked_org:-}}"
+  PLATFORM_REPO_ID="${PLATFORM_REPO_ID:-${looked_repo:-}}"
+fi
+want GITHUB_ORG_ID "${GITHUB_ORG_ID}" '^[0-9]+$' "the org's numeric id (gh api orgs/<org> --jq .id); gh could not look it up"
+want PLATFORM_REPO_ID "${PLATFORM_REPO_ID}" '^[0-9]+$' "the repository's numeric id (gh api repos/<org>/<repo> --jq .id); gh could not look it up"
+
+if (( ${#problems[@]} )); then
+  printf 'init: %s\n' "${problems[@]}" >&2
+  exit 1
+fi
+
+ALLOWED_REGIONS="${PRIMARY_REGION}"
+[[ "${EO_REGION}" == "${PRIMARY_REGION}" ]] || ALLOWED_REGIONS="${PRIMARY_REGION} ${EO_REGION}"
+ALL_APP_REPOS="$(echo "${PLATFORM_REPO} ${APP_REPOS}" | xargs)"
+
+cd "${root}"
+
+# --- 3. Drop the components that were not asked for -------------------------------
+workflows_of() {
+  case "$1" in
+    lambda-layers) echo lambda-layer ;;
+    *) echo "$1" ;;
+  esac
+}
+for c in ${ALL_COMPONENTS}; do
+  selected "${c}" && continue
+  rm -rf "${c}" ".github/workflows/$(workflows_of "${c}").yml"
+  echo "removed ${c}"
+done
+if ! selected infrastructure; then
+  # The rendered README's infrastructure steps go with it.
+  sed -i.bak '/<!-- infrastructure -->/,/<!-- \/infrastructure -->/d' README.tenant.md && rm -f README.tenant.md.bak
+fi
+
+# --- 4. Replace every token --------------------------------------------------------
+tokens=(
+  "TENANT=${TENANT}" "PREFIX=${PREFIX}" "GITHUB_ORG=${GITHUB_ORG}" "GITHUB_ORG_ID=${GITHUB_ORG_ID}"
+  "PLATFORM_REPO=${PLATFORM_REPO}" "PLATFORM_REPO_ID=${PLATFORM_REPO_ID}" "APP_REPOS=${ALL_APP_REPOS}"
+  "PRIMARY_REGION=${PRIMARY_REGION}" "EO_REGION=${EO_REGION}" "ALLOWED_REGIONS=${ALLOWED_REGIONS}"
+  "DEV_ACCOUNT_ID=${DEV_ACCOUNT_ID}" "DEV_PROFILE=${DEV_PROFILE}"
+  "PRODUCTION_ACCOUNT_ID=${PRODUCTION_ACCOUNT_ID}" "PRODUCTION_PROFILE=${PRODUCTION_PROFILE}"
+  "SAR_PUBLISHER_ACCOUNT_ID=${SAR_PUBLISHER_ACCOUNT_ID}" "EVENTS_OBSERVABILITY=${EVENTS_OBSERVABILITY}"
+  "COMPONENTS=$(echo "${COMPONENTS}" | xargs)"
+)
+script=""
+for pair in "${tokens[@]}"; do
+  # Every value was checked above: none holds a | or a backslash.
+  script+="s|__${pair%%=*}__|${pair#*=}|g;"
+done
+
+# Directory names first, deepest last so a parent is renamed after its children
+# have been moved; two names that become one (EO_REGION = PRIMARY_REGION) merge.
+while IFS= read -r dir; do
+  target="$(dirname "${dir}")/$(basename "${dir}" | sed "${script}")"
+  [[ "${target}" == "${dir}" ]] && continue
+  mkdir -p "${target}"
+  cp -R "${dir}/." "${target}/"
+  rm -rf "${dir}"
+done < <(find . -depth -type d -name '*__*__*' -not -path './.git/*')
+
+while IFS= read -r file; do
+  grep -qE '__[A-Z][A-Z0-9_]*__' "${file}" || continue
+  sed -i.bak "${script}" "${file}" && rm -f "${file}.bak"
+done < <(find . -type f -not -path './.git/*' -not -path '*/.tool/*' -not -path './bin/init' -not -name '*.png')
+
+# --- 5. Leave a tenant repository --------------------------------------------------
+mv README.tenant.md README.md
+rm -f init.env.example LICENSE scripts/leak-check.py scripts/test-init.sh .github/workflows/blueprint.yml
+# The blueprint-only targets of the root Makefile.
+sed -i.bak '/^# >>> blueprint-only/,/^# <<< blueprint-only/d' Makefile && rm -f Makefile.bak
+
+left="$(grep -rnE --exclude-dir=.git '__[A-Z][A-Z0-9_]*__' . | grep -v '^./bin/init:' || true)"
+[[ -z "${left}" ]] || { echo "${left}"; die "tokens left after rendering: the blueprint has a token init does not know"; }
+
+rm -f bin/init
+echo
+echo "${TENANT} (${PREFIX}): rendered ${COMPONENTS// /, }."
+echo "Next: review the diff, keep init.env out of git (it is ignored), and run 'make ready'"
+echo "to list the CHANGEME values left to fill in. README.md has the order of the first deploy."

@@ -1,0 +1,162 @@
+name: infrastructure
+
+# Terragrunt for infrastructure/live, with the bootstrap's platform-deploy-role,
+# in the GitHub environment of the same name (AWS_PLATFORM_ROLE_ARN, AWS_REGION).
+#
+#   PR       check, then plan dev
+#   main     check, plan and apply dev; then plan production and apply it, each
+#            behind the production environment's reviewers: approve the plan job
+#            to see the plan, and the apply job once you have read it
+#   dispatch plan or apply one environment
+#
+# `run --all apply` re-plans and adds -auto-approve: the approval is the
+# environment's reviewers, so production must have them before its first apply.
+
+on:
+  pull_request:
+    paths:
+      - infrastructure/**
+      - .github/workflows/infrastructure.yml
+  push:
+    branches: [main]
+    paths:
+      - infrastructure/**
+      - .github/workflows/infrastructure.yml
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment, and the directory under infrastructure/live/
+        type: choice
+        options: [dev, production]
+      command:
+        type: choice
+        options: [plan, apply]
+        default: plan
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (no AWS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-tools
+        with:
+          terraform: "true"
+      - run: make -C infrastructure check
+
+  dev:
+    name: dev ${{ github.event_name == 'push' && 'apply' || 'plan' }}
+    needs: [check]
+    # The blueprint itself deploys nothing: only a repository rendered from it does.
+    if: github.repository != 'jnet-platform-factory/platform-blueprint' && github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: infrastructure-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-tools
+        with:
+          terraform: "true"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: make -C infrastructure plan ENV=dev
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: make -C infrastructure apply ENV=dev
+
+  production-plan:
+    name: production plan
+    needs: [dev]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository != 'jnet-platform-factory/platform-blueprint'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: infrastructure-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-tools
+        with:
+          terraform: "true"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: make -C infrastructure plan ENV=production
+
+  production-apply:
+    name: production apply
+    needs: [production-plan]
+    runs-on: ubuntu-latest
+    # Required reviewers, main only. Approve after reading the plan above.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: infrastructure-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-tools
+        with:
+          terraform: "true"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: make -C infrastructure apply ENV=production
+
+  dispatch:
+    name: ${{ inputs.environment }} ${{ inputs.command }}
+    needs: [check]
+    if: github.event_name == 'workflow_dispatch' && github.repository != 'jnet-platform-factory/platform-blueprint' && (inputs.command == 'plan' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: infrastructure-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-tools
+        with:
+          terraform: "true"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: make -C infrastructure "${{ inputs.command }}" ENV="${{ inputs.environment }}"
+
+  # A job of its own: the action is pinned to a movable tag in another org, so
+  # it runs where no token or credential is.
+  summary:
+    name: Summary
+    needs: [check, dev, production-plan, production-apply, dispatch]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Summary
+        continue-on-error: true
+        uses: jnet-platform-factory/.github/actions/job-summary@v0.0.1
+        with:
+          title: infrastructure
+          needs: ${{ toJSON(needs) }}
+          rows: |
+            Trigger: ${{ github.event_name }}
+            Commit: ${{ github.sha }}

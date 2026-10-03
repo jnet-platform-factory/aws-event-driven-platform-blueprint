@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# check <tenant-map> <template-url> <sar-version> <params-file>...: no AWS.
+#
+#   - every parameter file passes ../../bin/check-params against the product's
+#     template at the pinned public tag;
+#   - its ShapingConfig is the tenant map, minified;
+#   - that template is the SAR version pinned (the public repo's Publish to SAR
+#     refuses a tag that differs from SemanticVersion, so the two move together).
+
+set -euo pipefail
+
+tenant="${1:?usage: check <tenant-map> <template-url> <sar-version> <params-file>...}"
+template_url="${2:?}"; sar_version="${3:?}"; shift 3
+here="$(cd "$(dirname "$0")" && pwd)"
+failures=0
+fail() { echo "  FAIL  $*"; failures=$((failures + 1)); }
+ok()   { echo "  ok    $*"; }
+
+template="$(mktemp)"; trap 'rm -f "${template}"' EXIT
+curl -fsSL "${template_url}" -o "${template}" || { echo "cannot fetch ${template_url}"; exit 1; }
+
+version="$(sed -n 's/^ *SemanticVersion: *//p' "${template}")"
+if [[ "${version}" == "${sar_version}" ]]; then ok "the pinned template is SAR ${sar_version}"
+else fail "the pinned template is SemanticVersion ${version}, not SAR_VERSION ${sar_version}: move them together"; fi
+
+want="$(jq -c . "${tenant}")" || { fail "${tenant} is not valid JSON"; exit 1; }
+for params in "$@"; do
+  "${here}/../../bin/check-params" "${params}" "${template}" || failures=$((failures + 1))
+  have="$(jq -r '.[] | select(.ParameterKey == "ShapingConfig") | .ParameterValue' "${params}")"
+  if [[ "${have}" == "${want}" ]]; then ok "${params}: ShapingConfig is $(basename "${tenant}"), minified"
+  else fail "${params}: ShapingConfig differs from 'jq -c . ${tenant}'"; fi
+done
+
+echo
+(( failures == 0 )) || { echo "${failures} problem(s)"; exit 1; }
+echo "check: ok"

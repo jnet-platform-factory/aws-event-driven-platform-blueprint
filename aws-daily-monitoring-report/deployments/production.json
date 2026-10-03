@@ -1,0 +1,46 @@
+[
+  {
+    "ParameterKey": "AccountName",
+    "ParameterValue": "__TENANT__ production"
+  },
+  {
+    "ParameterKey": "EventBusName",
+    "ParameterValue": "default"
+  },
+  {
+    "ParameterKey": "FunctionNameSuffix",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "MonitoringRegion",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "RecipientEmail",
+    "ParameterValue": "CHANGEME@example.com"
+  },
+  {
+    "ParameterKey": "ScheduleEnabled",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "ScheduleExpression",
+    "ParameterValue": "cron(0 10 * * ? *)"
+  },
+  {
+    "ParameterKey": "SenderEmail",
+    "ParameterValue": "CHANGEME@example.com"
+  },
+  {
+    "ParameterKey": "SnapshotBucket",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SnapshotPrefix",
+    "ParameterValue": "snapshots/"
+  },
+  {
+    "ParameterKey": "SnapshotSlug",
+    "ParameterValue": "__PREFIX__-production"
+  }
+]
