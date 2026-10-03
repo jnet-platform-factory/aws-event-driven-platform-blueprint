@@ -28,7 +28,7 @@ check: lint components ## Every gate that needs no AWS
 lint: ## shellcheck, actionlint and cfn-lint
 	shellcheck $(SHELL_SCRIPTS)
 	actionlint
-	@if [ -f aws-account-bootstrap/ci-roles/template.yaml ]; then cfn-lint aws-account-bootstrap/ci-roles/template.yaml; fi
+	@if [ -f aws-account-bootstrap/ci-roles/template.yaml ]; then cfn-lint --regions us-east-1 -- aws-account-bootstrap/ci-roles/template.yaml; fi
 
 components: ## Each component's own `make check`
 	@for c in $(COMPONENTS); do echo "== $$c"; $(MAKE) --no-print-directory -C "$$c" check PYTHON="$(PYTHON)" || exit 1; done

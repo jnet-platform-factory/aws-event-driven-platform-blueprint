@@ -76,7 +76,8 @@ help: ## Show this help
 
 check: same-account fetch ## Pin, configs, scripts and the CI roles template (no AWS)
 	@shellcheck bin/diff-live bin/github-oidc
-	@cfn-lint ci-roles/template.yaml
+	@# IAM linting is the same in every region; the env's AWS_REGION may be a token.
+	@cfn-lint --regions us-east-1 -- ci-roles/template.yaml
 	@echo "check: ok"
 
 fetch: $(TOOL_DIR)/.pinned ## Clone the tool at TOOL_REF into .tool/ (no AWS)
