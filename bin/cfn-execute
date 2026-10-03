@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# cfn-execute: execute CHANGE_SET on STACK, the change set cfn-changeset created
+# and someone has read, and wait for the create or update to finish.
+#
+# Environment: AWS (the aws command, region set), STACK, ACCOUNT_ID, CHANGE_SET,
+# and optionally LABEL.
+
+# shellcheck disable=SC2016  # backticks are JMESPath literals
+set -euo pipefail
+: "${AWS:?}" "${STACK:?}" "${ACCOUNT_ID:?}" "${CHANGE_SET:?}"
+read -r -a aws <<<"${AWS}"
+label="${LABEL:-${STACK}}"
+die() { echo "error: $*" >&2; exit 1; }
+
+caller="$("${aws[@]}" sts get-caller-identity --query Account --output text)"
+[[ "${caller}" == "${ACCOUNT_ID}" ]] || die "the credentials are for another account than ${label}'s stack"
+
+# Only the change set that was reviewed, and only while it still applies: one
+# made stale by another update reports OBSOLETE.
+read -r status execution < <("${aws[@]}" cloudformation describe-change-set --stack-name "${STACK}" \
+  --change-set-name "${CHANGE_SET}" --query '[Status, ExecutionStatus]' --output text)
+[[ "${status}" == CREATE_COMPLETE && "${execution}" == AVAILABLE ]] ||
+  die "${CHANGE_SET} is ${status}/${execution}, not CREATE_COMPLETE/AVAILABLE: create a new one"
+
+# A stack still in REVIEW_IN_PROGRESS has never been created: this is its create.
+before="$("${aws[@]}" cloudformation describe-stacks --stack-name "${STACK}" --query 'Stacks[0].StackStatus' --output text)"
+waiter=stack-update-complete
+[[ "${before}" == REVIEW_IN_PROGRESS ]] && waiter=stack-create-complete
+
+echo "Executing ${CHANGE_SET} on ${label}, waiting for ${waiter#stack-}"
+"${aws[@]}" cloudformation execute-change-set --stack-name "${STACK}" --change-set-name "${CHANGE_SET}"
+if ! "${aws[@]}" cloudformation wait "${waiter}" --stack-name "${STACK}"; then
+  "${aws[@]}" cloudformation describe-stack-events --stack-name "${STACK}" --max-items 25 \
+    --query 'StackEvents[?contains(ResourceStatus, `FAILED`)].[LogicalResourceId, ResourceStatus, ResourceStatusReason]' \
+    --output text >&2 || true
+  die "${label} did not reach ${waiter#stack-}"
+fi
+echo "${label}: $("${aws[@]}" cloudformation describe-stacks --stack-name "${STACK}" --query 'Stacks[0].StackStatus' --output text)"

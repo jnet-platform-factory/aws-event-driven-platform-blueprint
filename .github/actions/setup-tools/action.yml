@@ -1,0 +1,70 @@
+name: Set up the platform tools
+description: >
+  Python 3.13 and whatever else a job needs: SAM, Terraform and Terragrunt, and
+  the linters. One place for the versions every workflow uses.
+
+inputs:
+  sam:
+    description: Install the SAM CLI
+    default: "false"
+  terraform:
+    description: Install Terraform and Terragrunt
+    default: "false"
+  lint:
+    description: Install actionlint and cfn-lint
+    default: "false"
+  python-requirements:
+    description: Space-separated requirements files to pip install (missing ones are skipped)
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    - name: Python packages
+      shell: bash
+      env:
+        REQUIREMENTS: ${{ inputs.python-requirements }}
+        LINT: ${{ inputs.lint }}
+      run: |
+        args=(pytest)
+        [[ "${LINT}" == true ]] && args+=(cfn-lint)
+        for r in ${REQUIREMENTS}; do [[ -f "${r}" ]] && args+=(-r "${r}"); done
+        python -m pip install --quiet "${args[@]}"
+
+    - if: inputs.sam == 'true'
+      uses: aws-actions/setup-sam@v2
+      with:
+        use-installer: true
+
+    - if: inputs.terraform == 'true'
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.13.0"
+        terraform_wrapper: false
+
+    - if: inputs.terraform == 'true'
+      name: Terragrunt
+      shell: bash
+      env:
+        TERRAGRUNT_VERSION: "0.86.2"
+      run: |
+        mkdir -p "${RUNNER_TEMP}/bin"
+        curl -fsSLo "${RUNNER_TEMP}/bin/terragrunt" \
+          "https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64"
+        chmod +x "${RUNNER_TEMP}/bin/terragrunt"
+        echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+    - if: inputs.lint == 'true'
+      name: actionlint
+      shell: bash
+      env:
+        ACTIONLINT_VERSION: "1.7.12"
+      run: |
+        mkdir -p "${RUNNER_TEMP}/bin"
+        cd "${RUNNER_TEMP}/bin"
+        bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "${ACTIONLINT_VERSION}"
+        echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"

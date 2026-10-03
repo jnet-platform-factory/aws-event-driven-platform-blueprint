@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Base Lambda layer: the Python libraries most functions share, built by
+  `sam build` from layer/requirements.txt for the Lambda runtime and
+  architecture, and published as a layer version. Its ARN is written to SSM so
+  applications read the current one at deploy time.
+
+Parameters:
+  Stage:
+    Type: String
+    AllowedValues: [dev, production]
+  LayerName:
+    Type: String
+    AllowedPattern: "^[a-zA-Z0-9-_]+$"
+
+Resources:
+  BaseLayer:
+    Type: AWS::Serverless::LayerVersion
+    # A new version on every change; the old ones stay, so every function still
+    # pinned to one keeps working until it is redeployed.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LayerName: !Ref LayerName
+      Description: !Sub "${LayerName}: see layer/requirements.txt"
+      ContentUri: layer/
+      CompatibleRuntimes: [python3.13]
+      CompatibleArchitectures: [arm64]
+      RetentionPolicy: Retain
+    Metadata:
+      BuildMethod: python3.13
+      BuildArchitecture: arm64
+
+  # Outside /platform/<stage>/, which infrastructure/ owns.
+  BaseLayerArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/layers/${Stage}/base"
+      Description: The current base layer version
+      Type: String
+      Value: !Ref BaseLayer
+
+Outputs:
+  BaseLayerArn:
+    Description: The layer version this stack published
+    Value: !Ref BaseLayer

@@ -1,0 +1,96 @@
+name: aws-daily-monitoring-report
+
+# The aws-daily-monitoring-report stack, one per account (__PRIMARY_REGION__),
+# built from the public tool at the commit pinned in
+# aws-daily-monitoring-report/Makefile.
+#
+#   PR     check, then a dev change set shown in the run summary and deleted
+#   main   check, dev change set and execute; then the production change set
+#          and execute, each behind the production environment's reviewers
+#
+# Roles: the bootstrap's app-deploy-role, from the dev / production GitHub
+# environments (AWS_APP_ROLE_ARN). CloudFormation acts as app-cfn-exec-role.
+
+on:
+  pull_request:
+    paths:
+      - aws-daily-monitoring-report/**
+      - bin/**
+      - .github/workflows/aws-daily-monitoring-report.yml
+      - .github/workflows/cfn-changeset.yml
+  push:
+    branches: [main]
+    paths:
+      - aws-daily-monitoring-report/**
+      - bin/**
+      - .github/workflows/aws-daily-monitoring-report.yml
+      - .github/workflows/cfn-changeset.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (no AWS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-tools
+        with:
+          sam: "true"
+      - run: |
+          make -C aws-daily-monitoring-report verify-pin
+          make -C aws-daily-monitoring-report check
+
+  dev:
+    # The blueprint itself deploys nothing: only a repository rendered from it does.
+    if: github.repository != 'jnet-platform-factory/platform-blueprint'
+    needs: [check]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/cfn-changeset.yml
+    with:
+      component: aws-daily-monitoring-report
+      stage: dev
+      region: __PRIMARY_REGION__
+      plan_environment: dev
+      execute_environment: dev
+      execute: ${{ github.event_name != 'pull_request' }}
+
+  production:
+    needs: [dev]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository != 'jnet-platform-factory/platform-blueprint'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/cfn-changeset.yml
+    with:
+      component: aws-daily-monitoring-report
+      stage: production
+      region: __PRIMARY_REGION__
+      plan_environment: production
+      execute_environment: production
+      execute: true
+
+  # A job of its own: the action is pinned to a movable tag in another org, so
+  # it runs where no token or credential is.
+  summary:
+    name: Summary
+    needs: [check, dev, production]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Summary
+        continue-on-error: true
+        uses: jnet-platform-factory/.github/actions/job-summary@v0.0.1
+        with:
+          title: aws-daily-monitoring-report
+          needs: ${{ toJSON(needs) }}
+          rows: |
+            Trigger: ${{ github.event_name }}
+            dev change set: ${{ needs.dev.outputs.change_set }} (changes: ${{ needs.dev.outputs.changed }}, executed: ${{ needs.dev.outputs.executed }})
+            production change set: ${{ needs.production.outputs.change_set }} (changes: ${{ needs.production.outputs.changed }}, executed: ${{ needs.production.outputs.executed }})
+            Commit: ${{ github.sha }}

@@ -1,0 +1,48 @@
+name: Blueprint
+
+# The blueprint's own gates (bin/init removes this workflow from a rendered
+# repository):
+#
+#   leak check   nothing internal in the tree: this repository is public
+#   test-init    render the blueprint with example answers, in two shapes, and
+#                run every check on each result
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  blueprint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-tools
+        with:
+          sam: "true"
+          terraform: "true"
+          lint: "true"
+          python-requirements: platform-api/src/requirements.txt
+      - name: Leak check
+        id: leak
+        env:
+          # Optional organisation-specific terms, kept out of the repository.
+          LEAK_CHECK_DENY: ${{ secrets.LEAK_CHECK_DENY }}
+        run: make leak-check
+      - name: Render and check
+        id: render
+        run: make test-init
+      - name: Summary
+        if: always()
+        continue-on-error: true
+        uses: jnet-platform-factory/.github/actions/job-summary@v0.0.1
+        with:
+          title: Blueprint
+          status: ${{ job.status }}
+          rows: |
+            Branch: ${{ github.head_ref || github.ref_name }}
+            Leak check: ${{ steps.leak.outcome == 'success' && '✅ passed' || steps.leak.outcome == 'failure' && '❌ failed' || '⏭️ skipped' }}
+            Render and check: ${{ steps.render.outcome == 'success' && '✅ passed' || steps.render.outcome == 'failure' && '❌ failed' || '⏭️ skipped' }}

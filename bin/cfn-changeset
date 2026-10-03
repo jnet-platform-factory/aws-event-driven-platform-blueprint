@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# cfn-changeset: create, describe and gate a CloudFormation change set. Executes
+# nothing. Every component deploys through this script, so every deploy is read
+# before it is run.
+#
+#   - CREATE when the stack does not exist yet (or is still REVIEW_IN_PROGRESS),
+#     UPDATE when it is settled; any other state is refused;
+#   - the parameter file must give every parameter the template declares, and
+#     nothing else: one left out would silently take the template's default;
+#   - the change set is created with --role-arn EXEC_ROLE, so the stack's
+#     resources are made by that role and not by whoever runs this;
+#   - an empty change set is deleted and reported as "no changes";
+#   - a Remove, or a Replacement of True, fails the run and deletes the change
+#     set, unless ALLOW_DESTRUCTIVE=1. Conditional replacements are listed.
+#
+# Environment:
+#   AWS          the aws command, region set (e.g. "aws --region us-east-1")
+#   STACK        stack name
+#   ACCOUNT_ID   the account the stack must be in; the credentials are checked
+#   EXEC_ROLE    CloudFormation service role ARN
+#   PARAMS       parameter file: [{"ParameterKey": ..., "ParameterValue": ...}]
+#   CHANGE_SET   change set name
+#   TEMPLATE     a local template file, or
+#   TEMPLATE_URL an S3 / SAR template URL
+#   optional: CAPABILITIES (default "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"),
+#             TAGS (a JSON list of {Key, Value}), DESCRIPTION, LABEL (for the
+#             summary), ALLOW_DESTRUCTIVE=1
+#
+# Under GitHub Actions it writes change_set, changed, type, add, modify, remove
+# and replace to $GITHUB_OUTPUT, and the change table to $GITHUB_STEP_SUMMARY.
+# Neither ever contains an account id or an ARN.
+
+# shellcheck disable=SC2016  # backticks are Markdown and JMESPath literals
+set -euo pipefail
+: "${AWS:?}" "${STACK:?}" "${ACCOUNT_ID:?}" "${EXEC_ROLE:?}" "${PARAMS:?}" "${CHANGE_SET:?}"
+[[ -n "${TEMPLATE:-}${TEMPLATE_URL:-}" ]] || { echo "error: set TEMPLATE or TEMPLATE_URL" >&2; exit 1; }
+read -r -a aws <<<"${AWS}"
+read -r -a capabilities <<<"${CAPABILITIES:-CAPABILITY_IAM CAPABILITY_AUTO_EXPAND}"
+label="${LABEL:-${STACK}}"
+die() { echo "error: $*" >&2; exit 1; }
+output() { [[ -z "${GITHUB_OUTPUT:-}" ]] || echo "$1=$2" >> "${GITHUB_OUTPUT}"; }
+summary() { [[ -z "${GITHUB_STEP_SUMMARY:-}" ]] || cat >> "${GITHUB_STEP_SUMMARY}"; }
+
+if [[ -n "${TEMPLATE:-}" ]]; then
+  [[ -f "${TEMPLATE}" ]] || die "${TEMPLATE} not found"
+  template_arg=(--template-body "file://${TEMPLATE}")
+else
+  template_arg=(--template-url "${TEMPLATE_URL}")
+fi
+
+caller="$("${aws[@]}" sts get-caller-identity --query Account --output text)"
+[[ "${caller}" == "${ACCOUNT_ID}" ]] || die "the credentials are for another account than ${label}'s stack"
+
+# CREATE or UPDATE, from the stack's state.
+err="$(mktemp)"; trap 'rm -f "${err}"' EXIT
+if status="$("${aws[@]}" cloudformation describe-stacks --stack-name "${STACK}" \
+               --query 'Stacks[0].StackStatus' --output text 2>"${err}")"; then
+  :
+elif grep -q 'does not exist' "${err}"; then
+  status=NONE
+else
+  cat "${err}" >&2; die "cannot read ${STACK}"
+fi
+case "${status}" in
+  NONE | REVIEW_IN_PROGRESS) type=CREATE ;;
+  CREATE_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE | IMPORT_COMPLETE) type=UPDATE ;;
+  ROLLBACK_COMPLETE) die "${STACK} is ROLLBACK_COMPLETE: its create failed and it can only be deleted. Read its events, then delete it by hand" ;;
+  *) die "${STACK} is ${status}: wait for it to settle, or fix it by hand" ;;
+esac
+echo "${label}: ${status} -> ${type} change set ${CHANGE_SET}"
+output type "${type}"
+
+# Every parameter the template declares is given, and nothing else.
+declared="$("${aws[@]}" cloudformation get-template-summary "${template_arg[@]}" \
+              --query 'Parameters[].ParameterKey' --output text | tr '\t' '\n' | sed '/^None$/d;/^$/d' | sort)"
+given="$(jq -r '.[].ParameterKey' "${PARAMS}" | sort)"
+[[ "${declared}" == "${given}" ]] ||
+  die "${PARAMS} does not match the template's parameters:
+$(diff <(echo "${declared}") <(echo "${given}") | sed -n 's/^< /  missing: /p; s/^> /  unknown: /p')"
+
+tags=()
+[[ -z "${TAGS:-}" ]] || tags=(--tags "${TAGS}")
+
+"${aws[@]}" cloudformation create-change-set --stack-name "${STACK}" --change-set-name "${CHANGE_SET}" \
+  --change-set-type "${type}" "${template_arg[@]}" --role-arn "${EXEC_ROLE}" \
+  --capabilities "${capabilities[@]}" --parameters "file://${PARAMS}" ${tags[@]+"${tags[@]}"} \
+  --description "${DESCRIPTION:-${label}}" >/dev/null
+output change_set "${CHANGE_SET}"
+
+if ! "${aws[@]}" cloudformation wait change-set-create-complete --stack-name "${STACK}" --change-set-name "${CHANGE_SET}" 2>/dev/null; then
+  reason="$("${aws[@]}" cloudformation describe-change-set --stack-name "${STACK}" --change-set-name "${CHANGE_SET}" \
+              --query StatusReason --output text)"
+  if [[ "${reason}" == *"didn't contain changes"* || "${reason}" == *"No updates are to be performed"* ]]; then
+    echo "No changes: ${label} already matches the template and ${PARAMS}"
+    "${aws[@]}" cloudformation delete-change-set --stack-name "${STACK}" --change-set-name "${CHANGE_SET}"
+    output changed false
+    printf '### %s\n\nNo changes: already matches the template and `%s`.\n' "${label}" "${PARAMS}" | summary
+    exit 0
+  fi
+  die "change set ${CHANGE_SET} failed: ${reason}"
+fi
+output changed true
+
+changes="$("${aws[@]}" cloudformation describe-change-set --stack-name "${STACK}" --change-set-name "${CHANGE_SET}" \
+             --query 'Changes[].ResourceChange' --output json)"
+count() { jq "[.[] | select($1)] | length" <<<"${changes}"; }
+output add "$(count '.Action == "Add"')"
+output modify "$(count '.Action == "Modify"')"
+output remove "$(count '.Action == "Remove"')"
+output replace "$(count '.Replacement == "True"')"
+
+jq -r '["ACTION", "RESOURCE", "TYPE", "REPLACEMENT"], (.[] | [.Action, .LogicalResourceId, .ResourceType, (.Replacement // "-")]) | @tsv' \
+  <<<"${changes}" | column -t -s $'\t'
+{
+  printf '### %s: %s\n\nChange set `%s`, %s change(s).\n\n' \
+    "${label}" "${type}" "${CHANGE_SET}" "$(jq length <<<"${changes}")"
+  echo '| Action | Resource | Type | Replacement |'
+  echo '| --- | --- | --- | --- |'
+  jq -r '.[] | "| \(.Action) | \(.LogicalResourceId) | \(.ResourceType) | \(.Replacement // "-") |"' <<<"${changes}"
+} | summary
+
+destructive="$(jq -r '[.[] | select(.Action == "Remove" or .Replacement == "True") | "\(.Action) \(.LogicalResourceId)"] | join(", ")' <<<"${changes}")"
+if [[ -n "${destructive}" ]]; then
+  if [[ "${ALLOW_DESTRUCTIVE:-}" == 1 ]]; then
+    echo "WARNING: destructive changes allowed (ALLOW_DESTRUCTIVE=1): ${destructive}"
+  else
+    "${aws[@]}" cloudformation delete-change-set --stack-name "${STACK}" --change-set-name "${CHANGE_SET}" || true
+    printf '\n**Refused**: removes or replaces %s.\n' "${destructive}" | summary
+    die "the change set removes or replaces: ${destructive}. Read it; if that is intended, run again with ALLOW_DESTRUCTIVE=1"
+  fi
+fi
+conditional="$(jq -r '[.[] | select(.Replacement == "Conditional") | .LogicalResourceId] | join(", ")' <<<"${changes}")"
+[[ -z "${conditional}" ]] || echo "NOTE: may replace, depending on values known only at execute: ${conditional}"

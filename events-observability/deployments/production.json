@@ -1,0 +1,94 @@
+[
+  {
+    "ParameterKey": "AlertEmail",
+    "ParameterValue": "CHANGEME@example.com"
+  },
+  {
+    "ParameterKey": "CreateErrorAlerting",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "CreateForwardingRule",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "CreateSearchApi",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "DeliveryMode",
+    "ParameterValue": "Firehose"
+  },
+  {
+    "ParameterKey": "DigestReservedConcurrency",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "EnableEmitEndpoint",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "EnvironmentName",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "EventBusName",
+    "ParameterValue": "__PREFIX__-events-production"
+  },
+  {
+    "ParameterKey": "FailedDocumentRetentionDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "FirehoseBufferIntervalSeconds",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "FirehoseBufferSizeMBs",
+    "ParameterValue": "5"
+  },
+  {
+    "ParameterKey": "FirehoseIndexRotationPeriod",
+    "ParameterValue": "NoRotation"
+  },
+  {
+    "ParameterKey": "FirehoseStreamEnabled",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "ForwarderRoleName",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "NamePrefix",
+    "ParameterValue": "__PREFIX__"
+  },
+  {
+    "ParameterKey": "OpenSearchEndpoint",
+    "ParameterValue": "search-CHANGEME.__EO_REGION__.es.amazonaws.com"
+  },
+  {
+    "ParameterKey": "OpenSearchIndex",
+    "ParameterValue": "__PREFIX__-events-production"
+  },
+  {
+    "ParameterKey": "OpenSearchRegion",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "OpenSearchResourceArn",
+    "ParameterValue": "arn:aws:es:__EO_REGION__:CHANGEME:domain/CHANGEME/*"
+  },
+  {
+    "ParameterKey": "OpenSearchServiceName",
+    "ParameterValue": "es"
+  },
+  {
+    "ParameterKey": "SearchApiAuthorizerArn",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "ShapingConfig",
+    "ParameterValue": "{\"defaults\":{\"environment\":\"unknown\",\"application\":\"__TENANT__\",\"organization\":\"default_org\",\"username\":\"default_user\"}}"
+  }
+]

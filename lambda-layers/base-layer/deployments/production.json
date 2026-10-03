@@ -1,0 +1,10 @@
+[
+  {
+    "ParameterKey": "LayerName",
+    "ParameterValue": "__PREFIX__-base-python313"
+  },
+  {
+    "ParameterKey": "Stage",
+    "ParameterValue": "production"
+  }
+]

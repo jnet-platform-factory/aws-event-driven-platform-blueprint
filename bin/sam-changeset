@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# sam-changeset: build a SAM template, package it, and create, and describe, a
+# change set for it through cfn-changeset. Executes nothing.
+#
+# `sam build` writes into BUILD_DIR, so the source stays clean. `sam package
+# --resolve-s3` uploads the code to the account's SAM CLI bucket, under
+# S3_PREFIX, creating the aws-sam-cli-managed-default stack the first time.
+#
+# Environment: SAM (the sam command, with credentials), SAM_TEMPLATE, BUILD_DIR,
+# S3_PREFIX, REGION, plus everything cfn-changeset reads except TEMPLATE (AWS,
+# STACK, ACCOUNT_ID, EXEC_ROLE, PARAMS, CHANGE_SET, ...). Optional SAM_BUILD_FLAGS,
+# e.g. "--use-container".
+
+set -euo pipefail
+: "${SAM:?}" "${SAM_TEMPLATE:?}" "${BUILD_DIR:?}" "${S3_PREFIX:?}" "${REGION:?}"
+read -r -a sam <<<"${SAM}"
+read -r -a build_flags <<<"${SAM_BUILD_FLAGS:-}"
+here="$(cd "$(dirname "$0")" && pwd)"
+
+echo "Building $(basename "$(dirname "${SAM_TEMPLATE}")")"
+rm -rf "${BUILD_DIR}"
+sam build --template-file "${SAM_TEMPLATE}" --build-dir "${BUILD_DIR}" ${build_flags[@]+"${build_flags[@]}"} >/dev/null
+
+echo "Packaging into the SAM CLI bucket, prefix ${S3_PREFIX}/"
+"${sam[@]}" package --region "${REGION}" --template-file "${BUILD_DIR}/template.yaml" \
+  --resolve-s3 --s3-prefix "${S3_PREFIX}" \
+  --output-template-file "${BUILD_DIR}/packaged.yaml" >/dev/null
+
+TEMPLATE="${BUILD_DIR}/packaged.yaml" exec "${here}/cfn-changeset"

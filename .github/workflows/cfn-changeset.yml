@@ -1,0 +1,127 @@
+name: cfn-changeset
+
+# Reusable: one stage of one CloudFormation component — a change set, read, then
+# executed. Every component that deploys a stack calls this, so every deploy is
+# the same two jobs:
+#
+#   changeset   `make changeset STAGE=<stage>` in plan_environment. A pull
+#               request's change set is shown in the run summary and deleted.
+#   execute     `make execute` in execute_environment, only when asked, only on
+#               main, and only when the change set has changes. Give that
+#               environment required reviewers and approve after reading the
+#               change set.
+#
+# Credentials: the role ARNs given, or the bootstrap's AWS_APP_ROLE_ARN from the
+# GitHub environment the job runs in.
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        description: The component's directory
+        type: string
+        required: true
+      stage:
+        description: dev or production
+        type: string
+        required: true
+      region:
+        type: string
+        required: true
+      plan_environment:
+        description: GitHub environment of the change set job
+        type: string
+        required: true
+      execute_environment:
+        description: GitHub environment of the execute job
+        type: string
+        required: true
+      execute:
+        description: Execute the change set (main only)
+        type: boolean
+        default: false
+      changeset_role_arn:
+        description: Role for the change set job; default vars.AWS_APP_ROLE_ARN
+        type: string
+        default: ""
+      execute_role_arn:
+        description: Role for the execute job; default vars.AWS_APP_ROLE_ARN
+        type: string
+        default: ""
+      sam:
+        description: The change set needs sam build / package
+        type: boolean
+        default: true
+    outputs:
+      change_set:
+        value: ${{ jobs.changeset.outputs.change_set }}
+      changed:
+        value: ${{ jobs.changeset.outputs.changed }}
+      executed:
+        value: ${{ jobs.execute.outputs.executed }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  changeset:
+    name: Change set ${{ inputs.stage }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.plan_environment }}
+    # One stack per component and stage: never two change sets or executes at once.
+    concurrency:
+      group: ${{ inputs.component }}-${{ inputs.stage }}
+      cancel-in-progress: false
+    outputs:
+      change_set: ${{ steps.changeset.outputs.change_set }}
+      changed: ${{ steps.changeset.outputs.changed }}
+    env:
+      CHANGE_SET: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      DESCRIPTION: ${{ github.event_name == 'pull_request' && format('PR {0} at {1}', github.event.number, github.event.pull_request.head.sha) || format('{0} at {1}', github.ref_name, github.sha) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-tools
+        with:
+          sam: ${{ inputs.sam }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.changeset_role_arn || vars.AWS_APP_ROLE_ARN }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Create change set
+        id: changeset
+        run: make -C "${{ inputs.component }}" changeset STAGE="${{ inputs.stage }}" CHANGE_SET="$CHANGE_SET"
+
+      # A PR's change set is for reading; only main's is ever executed.
+      - name: Delete the PR's change set
+        if: always() && github.event_name == 'pull_request' && steps.changeset.outputs.change_set != ''
+        run: make -C "${{ inputs.component }}" delete-changeset STAGE="${{ inputs.stage }}" CHANGE_SET="$CHANGE_SET"
+
+  execute:
+    name: Execute ${{ inputs.stage }}
+    needs: [changeset]
+    if: inputs.execute && github.ref == 'refs/heads/main' && needs.changeset.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    # Required reviewers, main only (production). Approve after reading the change set.
+    environment: ${{ inputs.execute_environment }}
+    concurrency:
+      group: ${{ inputs.component }}-${{ inputs.stage }}
+      cancel-in-progress: false
+    outputs:
+      executed: ${{ steps.execute.outcome }}
+    env:
+      CHANGE_SET: ${{ needs.changeset.outputs.change_set }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.execute_role_arn || vars.AWS_APP_ROLE_ARN }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Execute change set
+        id: execute
+        run: make -C "${{ inputs.component }}" execute STAGE="${{ inputs.stage }}" CHANGE_SET="$CHANGE_SET"

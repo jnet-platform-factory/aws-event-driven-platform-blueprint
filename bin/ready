@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# ready [path ...]: fail while anything under the paths still needs filling in.
+# No AWS.
+#
+# The blueprint ships two kinds of placeholder, and both must be gone before a
+# deploy:
+#
+#   identity tokens   UPPER_SNAKE names between double underscores, which the
+#                     blueprint's bin/init replaces
+#   CHANGEME          per-environment values you choose (domains, CIDRs,
+#                     addresses, endpoints); edit the file that holds each
+#
+# Every target that reaches AWS runs this first, for its own component, so a
+# half-filled repository fails here rather than deploying a placeholder.
+
+set -euo pipefail
+
+[[ $# -gt 0 ]] || set -- .
+
+# Markdown only ever describes the placeholders, and this file names them.
+found="$(grep -rnIE --exclude-dir=.git --exclude-dir=.tool --exclude-dir=.build --exclude-dir=.aws-sam \
+           --exclude-dir=.terraform --exclude-dir=.terragrunt-cache --exclude='*.md' --exclude=ready \
+           '__[A-Z][A-Z0-9_]*__|CHANGEME' "$@" || true)"
+
+if [[ -n "${found}" ]]; then
+  echo "Not ready: fill these in first (README.md, \"Filling in\")"
+  while IFS= read -r line; do echo "  ${line}"; done <<<"${found}"
+  exit 1
+fi
+echo "ready: no placeholders in $*"

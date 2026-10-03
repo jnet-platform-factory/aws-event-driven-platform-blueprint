@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# check-params <params-file> <template>: no AWS.
+#
+#   - the parameter file is a list of unique {ParameterKey, ParameterValue},
+#     every value a string, with no duplicate JSON keys anywhere;
+#   - its keys are exactly the parameters of the template: one left out would
+#     silently take the template's default, which need not be what is live.
+#
+# <template> is a local file or an https URL (a pinned public template).
+# cfn-changeset checks the keys again against what CloudFormation reads, which is
+# the one that counts; this catches the mistake before any AWS call.
+
+set -euo pipefail
+
+params="${1:?usage: check-params <params-file> <template>}"
+template="${2:?usage: check-params <params-file> <template>}"
+failures=0
+fail() { echo "  FAIL  $*"; failures=$((failures + 1)); }
+ok()   { echo "  ok    $*"; }
+
+# json.load keeps the last of two duplicate keys without a word; refuse them.
+if python3 -c '
+import json, sys
+def pairs(items):
+    keys = [k for k, _ in items]
+    dup = {k for k in keys if keys.count(k) > 1}
+    if dup:
+        sys.exit("duplicate key(s): " + ", ".join(sorted(dup)))
+    return dict(items)
+json.load(open(sys.argv[1]), object_pairs_hook=pairs)
+' "${params}"; then ok "${params}: valid JSON, no duplicate keys"; else fail "${params}"; exit 1; fi
+
+if jq -e 'type == "array" and all(.[]; keys == ["ParameterKey", "ParameterValue"] and (.ParameterValue | type) == "string")' \
+     "${params}" >/dev/null; then
+  ok "${params}: every entry is {ParameterKey, ParameterValue} with a string value"
+else
+  fail "${params}: every entry must be {ParameterKey, ParameterValue}, the value a string"; exit 1
+fi
+dups="$(jq -r '[.[].ParameterKey] | group_by(.) | map(select(length > 1)[0]) | join(", ")' "${params}")"
+if [[ -z "${dups}" ]]; then ok "${params}: no parameter given twice"; else fail "${params}: given twice: ${dups}"; fi
+
+if [[ "${template}" == https://* ]]; then
+  body="$(curl -fsSL "${template}")" || { fail "cannot fetch ${template}"; exit 1; }
+else
+  body="$(cat "${template}")"
+fi
+
+# The parameter names: two-space keys between Parameters: and the next top-level key.
+declared="$(awk '/^Parameters:/ { on = 1; next } /^[^ #]/ { on = 0 } on && /^  [A-Za-z0-9]+:/ { sub(/:.*/, ""); sub(/^ +/, ""); print }' \
+              <<<"${body}" | sort)"
+given="$(jq -r '.[].ParameterKey' "${params}" | sort)"
+missing="$(comm -23 <(echo "${declared}") <(echo "${given}") | paste -sd ' ' -)"
+unknown="$(comm -13 <(echo "${declared}") <(echo "${given}") | paste -sd ' ' -)"
+if [[ -z "${missing}${unknown}" ]]; then
+  ok "${params}: every template parameter is given, and nothing else ($(grep -c . <<<"${declared}"))"
+else
+  [[ -n "${missing}" ]] && fail "${params}: not given, so it would take the template default: ${missing}"
+  [[ -n "${unknown}" ]] && fail "${params}: given but not a template parameter: ${unknown}"
+fi
+
+(( failures == 0 )) || { echo "${failures} problem(s)"; exit 1; }
