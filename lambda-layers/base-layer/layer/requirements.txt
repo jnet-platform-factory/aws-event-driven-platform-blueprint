@@ -2,5 +2,5 @@
 # runtime already; do not add them here.
 aws-lambda-powertools[all]==3.21.0
 pydantic==2.12.5
-PyJWT==2.10.1
+PyJWT==2.15.0
 requests==2.32.5
