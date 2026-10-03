@@ -1,0 +1,32 @@
+# Pinned public tools, fetched by each component's Makefile
+.tool/
+# Build output
+.aws-sam/
+.build/
+packaged.yaml
+samconfig.local.toml
+# Terraform / Terragrunt
+.terragrunt-cache/
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+backend.tf
+provider.tf
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+# Lambda layer artefacts
+*.zip
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+# The answers bin/init reads: they name your accounts. Never commit.
+init.env
+# Optional extra deny-list for scripts/leak-check.py. Never commit it: it names
+# what must not be published.
+.leak-check-deny
