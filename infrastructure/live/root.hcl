@@ -1,5 +1,5 @@
 # Root Terragrunt config for __TENANT__, deploying with platform-deploy-role.
-# Based on aws-account-bootstrap's templates/root.hcl (v0.0.3, unchanged to v0.0.5); keep the two close,
+# Based on aws-account-bootstrap's templates/root.hcl (v0.0.3, unchanged to v0.0.6); keep the two close,
 # so a newer template can be compared with this file.
 #
 # Layout:
