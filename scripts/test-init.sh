@@ -131,7 +131,10 @@ grep -q 'platform-api\|lambda-layers' "${minimal}/.github/dependabot.yml" && fai
 grep -q 'Infrastructure and the SSM bridge' "${minimal}/CLAUDE.md" && fail "minimal: CLAUDE.md kept the infrastructure section"
 # No management profile: no Identity Center step, and the targets refuse before any AWS.
 grep -q 'sso-plan' "${minimal}/README.md" && fail "minimal: README.md has an Identity Center step without a profile"
-out="$(make -C "${minimal}/aws-account-bootstrap" sso-plan 2>&1)" && fail "minimal: sso-plan ran without a management profile"
+# CI= as a person would run it: under CI the targets refuse earlier, for being CI.
+out="$(make -C "${minimal}/aws-account-bootstrap" sso-plan CI= 2>&1)" && fail "minimal: sso-plan ran without a management profile"
+out_ci="$(make -C "${minimal}/aws-account-bootstrap" sso-plan CI=true 2>&1)" && fail "minimal: sso-plan ran under CI"
+grep -q 'never CI' <<<"${out_ci}" || fail "minimal: sso-plan under CI did not say why it refused: ${out_ci}"
 grep -q 'no management account profile' <<<"${out}" || fail "minimal: sso-plan did not say why it refused: ${out}"
 grep -q '^ALLOWED_REGIONS="eu-west-1"$' "${minimal}/aws-account-bootstrap/configs/dev.env" || fail "minimal: ALLOWED_REGIONS"
 
