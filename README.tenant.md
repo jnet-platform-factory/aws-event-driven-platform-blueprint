@@ -4,7 +4,7 @@
 The tools are public, in [jnet-platform-factory](https://github.com/jnet-platform-factory),
 and pinned here by tag or commit; this repository holds only **TENANT**'s
 configuration and the pipelines that apply it. It was rendered from
-[platform-blueprint](https://github.com/jnet-platform-factory/platform-blueprint) — the
+[aws-event-driven-platform-blueprint](https://github.com/jnet-platform-factory/aws-event-driven-platform-blueprint) — the
 platform model, and the rules every pipeline follows, are in [PLATFORM.md](PLATFORM.md).
 
 | Environment  | AWS account                 | aws-vault profile        | Regions                               |
@@ -20,6 +20,16 @@ Components: `__COMPONENTS__`.
 Every target that reaches AWS runs it first, so nothing deploys a placeholder.
 
 ## First deploy, in order
+
+<!-- management -->
+
+0. **Identity Center**, once per organisation, in the management account
+   (`__MANAGEMENT_PROFILE__`): `make -C aws-account-bootstrap sso-plan`, read it, then
+   `make -C aws-account-bootstrap sso-apply`. It creates the permission sets people sign
+   in with and assigns them to the dev and production accounts, found by name or OU —
+   see the tool's README. The management account gets no deploy roles.
+
+<!-- /management -->
 
 1. **Bootstrap each account**, by hand, with admin credentials —
    [aws-account-bootstrap/README.md](aws-account-bootstrap/README.md): `make apply`, then
@@ -62,3 +72,6 @@ for the production reviewers.
 
 `make check` runs every gate locally; each component's own Makefile has the targets that
 reach AWS (`make help` in its directory).
+
+[CLAUDE.md](CLAUDE.md) (and `AGENTS.md`, a link to it) is the same map for coding agents:
+what each component owns, the order things deploy in, and the rules they must keep.

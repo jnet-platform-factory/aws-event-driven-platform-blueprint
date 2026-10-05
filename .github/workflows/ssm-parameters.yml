@@ -30,14 +30,15 @@ jobs:
     name: Check (no AWS)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: make -C ssm-parameters check
 
   dev:
     name: dev ${{ github.event_name == 'pull_request' && 'plan' || 'apply' }}
     needs: [check]
-    # The blueprint itself deploys nothing: only a repository rendered from it does.
-    if: github.repository != 'jnet-platform-factory/platform-blueprint'
+    # Only this repository deploys: in the blueprint the name is still a token, so it
+    # never matches, and neither does a fork or a copy.
+    if: github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__'
     runs-on: ubuntu-latest
     environment: dev
     permissions:
@@ -46,24 +47,29 @@ jobs:
     concurrency:
       group: ssm-parameters-dev
       cancel-in-progress: false
+    outputs:
+      changed: ${{ steps.plan.outputs.changed }}
+      current: ${{ steps.plan.outputs.current }}
+      errors: ${{ steps.plan.outputs.errors }}
     # Map each source_env in ssm-parameters.json onto a secret of this
     # environment, one line each:
     # env:
     #   PAYMENTS_API_KEY: ${{ secrets.PAYMENTS_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-      - run: make -C ssm-parameters plan ENV=dev
+      - id: plan
+        run: make -C ssm-parameters plan ENV=dev
       - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: make -C ssm-parameters apply ENV=dev
 
   production:
     name: production apply
     needs: [dev]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository != 'jnet-platform-factory/platform-blueprint'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__'
     runs-on: ubuntu-latest
     # Required reviewers, main only.
     environment: production
@@ -73,14 +79,19 @@ jobs:
     concurrency:
       group: ssm-parameters-production
       cancel-in-progress: false
+    outputs:
+      changed: ${{ steps.plan.outputs.changed }}
+      current: ${{ steps.plan.outputs.current }}
+      errors: ${{ steps.plan.outputs.errors }}
     # The same env: block as the dev job.
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-      - run: make -C ssm-parameters plan ENV=production
+      - id: plan
+        run: make -C ssm-parameters plan ENV=production
       - run: make -C ssm-parameters apply ENV=production
 
   # A job of its own: the action is pinned to a movable tag in another org, so
@@ -100,4 +111,6 @@ jobs:
           needs: ${{ toJSON(needs) }}
           rows: |
             Trigger: ${{ github.event_name }}
+            dev: ${{ needs.dev.outputs.changed || '-' }} to change, ${{ needs.dev.outputs.current || '-' }} current, ${{ needs.dev.outputs.errors || '-' }} errors
+            production: ${{ needs.production.outputs.changed || '-' }} to change, ${{ needs.production.outputs.current || '-' }} current, ${{ needs.production.outputs.errors || '-' }} errors
             Commit: ${{ github.sha }}

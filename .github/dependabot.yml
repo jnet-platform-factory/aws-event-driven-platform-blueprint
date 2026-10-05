@@ -1,0 +1,43 @@
+# Dependabot version updates: the GitHub Actions every workflow pins, and the
+# Python requirements of the components that have them. Security updates need no
+# file; these keep the pins moving between them.
+#
+# Every update is a pull request: the component's own workflow shows its check
+# and its dev plan or change set before anyone merges it.
+#
+# A tenant whose commits carry a ticket key can add a commit-message prefix to
+# each entry (a sentinel key, retitled when the PR is picked up). bin/init removes
+# the entries of the components it removes.
+version: 2
+updates:
+  # The workflows (directory "/" is how Dependabot addresses .github/workflows)
+  # and the shared setup-tools composite action.
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/setup-tools"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  # >>> platform-api
+  - package-ecosystem: "pip"
+    directory: "/platform-api/src"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+  # <<< platform-api
+
+  # >>> lambda-layers
+  - package-ecosystem: "pip"
+    directory: "/lambda-layers/base-layer/layer"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+  # <<< lambda-layers

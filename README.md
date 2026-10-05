@@ -1,4 +1,4 @@
-# platform-blueprint
+# aws-event-driven-platform-blueprint
 
 The base model for a **tenant platform repository**: the one private repository that
 holds a tenant's AWS configuration and runs every deploy into its accounts. Create a
@@ -19,7 +19,8 @@ This repository holds no tenant data. Everything tenant-specific is a token that
    regions, and the components to keep.
 3. **Render**: `make init`. It checks every answer before writing anything, looks up the
    GitHub ids with `gh`, removes the components you did not ask for, fills in every
-   token, and leaves a tenant README in place of this one.
+   token, and leaves a tenant README in place of this one, and a `CLAUDE.md` (with
+   `AGENTS.md` linked to it) for coding agents.
 4. **Fill in and commit**: `make ready` lists the `CHANGEME` values left (domains,
    addresses, the OpenSearch domain). Review the diff, commit, and follow the new
    README's _First deploy, in order_.

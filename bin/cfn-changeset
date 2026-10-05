@@ -8,10 +8,12 @@
 #   - the parameter file must give every parameter the template declares, and
 #     nothing else: one left out would silently take the template's default;
 #   - the change set is created with --role-arn EXEC_ROLE, so the stack's
-#     resources are made by that role and not by whoever runs this;
+#     resources are made by that role and not by whoever runs this; the role
+#     must be in ACCOUNT_ID, like the credentials;
 #   - an empty change set is deleted and reported as "no changes";
-#   - a Remove, or a Replacement of True, fails the run and deletes the change
-#     set, unless ALLOW_DESTRUCTIVE=1. Conditional replacements are listed.
+#   - a Remove, or a Replacement of True or Conditional, fails the run and
+#     deletes the change set, unless ALLOW_DESTRUCTIVE=1. A Conditional one
+#     depends on values known only at execute, so it is read as one that will.
 #
 # Environment:
 #   AWS          the aws command, region set (e.g. "aws --region us-east-1")
@@ -50,6 +52,9 @@ fi
 
 caller="$("${aws[@]}" sts get-caller-identity --query Account --output text)"
 [[ "${caller}" == "${ACCOUNT_ID}" ]] || die "the credentials are for another account than ${label}'s stack"
+# A service role in another account would make CloudFormation act there, or fail late.
+[[ "${EXEC_ROLE}" =~ ^arn:aws[a-z-]*:iam::([0-9]{12}):role/ ]] || die "EXEC_ROLE is not an IAM role ARN"
+[[ "${BASH_REMATCH[1]}" == "${ACCOUNT_ID}" ]] || die "EXEC_ROLE is a role in another account than ${label}'s stack"
 
 # CREATE or UPDATE, from the stack's state.
 err="$(mktemp)"; trap 'rm -f "${err}"' EXIT
@@ -107,7 +112,7 @@ count() { jq "[.[] | select($1)] | length" <<<"${changes}"; }
 output add "$(count '.Action == "Add"')"
 output modify "$(count '.Action == "Modify"')"
 output remove "$(count '.Action == "Remove"')"
-output replace "$(count '.Replacement == "True"')"
+output replace "$(count '.Replacement == "True" or .Replacement == "Conditional"')"
 
 jq -r '["ACTION", "RESOURCE", "TYPE", "REPLACEMENT"], (.[] | [.Action, .LogicalResourceId, .ResourceType, (.Replacement // "-")]) | @tsv' \
   <<<"${changes}" | column -t -s $'\t'
@@ -119,7 +124,9 @@ jq -r '["ACTION", "RESOURCE", "TYPE", "REPLACEMENT"], (.[] | [.Action, .LogicalR
   jq -r '.[] | "| \(.Action) | \(.LogicalResourceId) | \(.ResourceType) | \(.Replacement // "-") |"' <<<"${changes}"
 } | summary
 
-destructive="$(jq -r '[.[] | select(.Action == "Remove" or .Replacement == "True") | "\(.Action) \(.LogicalResourceId)"] | join(", ")' <<<"${changes}")"
+destructive="$(jq -r '[.[] | select(.Action == "Remove" or .Replacement == "True" or .Replacement == "Conditional")
+                         | "\(.Action) \(.LogicalResourceId)\(if .Replacement == "Conditional" then " (may replace)" else "" end)"]
+                       | join(", ")' <<<"${changes}")"
 if [[ -n "${destructive}" ]]; then
   if [[ "${ALLOW_DESTRUCTIVE:-}" == 1 ]]; then
     echo "WARNING: destructive changes allowed (ALLOW_DESTRUCTIVE=1): ${destructive}"
@@ -129,5 +136,3 @@ if [[ -n "${destructive}" ]]; then
     die "the change set removes or replaces: ${destructive}. Read it; if that is intended, run again with ALLOW_DESTRUCTIVE=1"
   fi
 fi
-conditional="$(jq -r '[.[] | select(.Replacement == "Conditional") | .LogicalResourceId] | join(", ")' <<<"${changes}")"
-[[ -z "${conditional}" ]] || echo "NOTE: may replace, depending on values known only at execute: ${conditional}"

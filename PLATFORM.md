@@ -2,7 +2,7 @@
 
 How a tenant platform is organised, which repository owns what, and the rules that
 keep live infrastructure safe. Every platform repository rendered from
-[platform-blueprint](https://github.com/jnet-platform-factory/platform-blueprint)
+[aws-event-driven-platform-blueprint](https://github.com/jnet-platform-factory/aws-event-driven-platform-blueprint)
 carries this file; change it in the blueprint, and carry the change to the tenants.
 
 ## 1. Public tooling, private configuration
@@ -15,7 +15,8 @@ jnet-platform-factory (PUBLIC)           tenant platform repo (PRIVATE)         
 │   opensearch-forwarder       │        │ deployment records,        │ deploy │          │
 │ aws-daily-monitoring-report  │        │ deploy/provision workflows │        │          │
 │ .github (job-summary action) │        │                            │        │          │
-│ platform-blueprint ─render──────────► │                            │        │          │
+│ aws-event-driven-platform-   │        │                            │        │          │
+│   blueprint ─render─────────────────► │                            │        │          │
 └──────────────────────────────┘        └────────────────────────────┘        └──────────┘
 ```
 
@@ -35,6 +36,9 @@ jnet-platform-factory (PUBLIC)           tenant platform repo (PRIVATE)         
 - **One AWS account per environment**, never shared: `dev` and `production` at least.
   The account is the boundary everything relies on — a deploy role, a permission set
   and a leaked credential each reach one account and no further.
+- **The management account runs no workloads.** It holds AWS Organizations, IAM
+  Identity Center and billing; the platform repository only runs Identity Center there
+  (`make sso-plan` / `sso-apply`), by hand, and gives it no deploy roles.
 - **The GitHub environment is named after the AWS environment.** The bootstrap's deploy
   roles trust exactly that environment, and their ARNs live in it as variables
   (`AWS_PLATFORM_ROLE_ARN`, `AWS_APP_ROLE_ARN`, `AWS_CFN_EXEC_ROLE_ARN`, `AWS_REGION`).
@@ -135,6 +139,16 @@ plan or change set it produces against every account.
   variable names, never values.
 - **Nothing deploys a placeholder**: every target that reaches AWS runs `make ready`
   first.
+- **Secrets never enter Terraform state.** Build a parameter's ARN from its name
+  instead of reading it with a `data "aws_ssm_parameter"`, which writes the value into
+  state in plain text. Secrets reach AWS through `ssm-parameters/`.
+- **Renaming this repository breaks its AWS trust.** The deploy roles trust the
+  repository by name in the OIDC subject, and the workflows deploy only from that name;
+  after a rename, update the bootstrap configs and apply before anything else deploys.
+- **App-owned infrastructure lives in the app's repository.** This repository owns the
+  accounts' shared foundation (network, zone, bus, the SSM bridge); what one application
+  alone uses is that application's, in its own `infrastructure/`, under its own state
+  key.
 
 ## 7. Account bootstrap
 
@@ -146,7 +160,11 @@ make plan    ACCOUNT=<env>   # renders every document; changes nothing
 make analyze ACCOUNT=<env>   # Access Analyzer + IAM simulator; read-only
 make diff    ACCOUNT=<env>   # rendered against live IAM; exit 1 on drift
 make apply   ACCOUNT=<env>   # changes IAM; refused for accounts in NO_APPLY
+make sso-plan / sso-apply    # Identity Center, in the management account
 ```
+
+- **Identity Center comes first**, once per organisation: the permission sets people sign
+  in with must exist before anyone works in the other accounts.
 
 - **The first apply in an account is a human's**, with admin: it creates the roles CI
   would use. Then `make ci-roles` deploys the roles the bootstrap pipeline itself

@@ -26,12 +26,26 @@ make analyze ACCOUNT=dev      # Access Analyzer + IAM simulator (the tool's `che
 make diff    ACCOUNT=dev      # rendered documents against live IAM; exit 1 on drift
 make apply   ACCOUNT=dev      # a human with admin the first time; then CI, behind a reviewer
 make verify-pin               # the tag still points at the pinned commit
+make sso-plan                 # Identity Center, in the management account; read-only
+make sso-apply                # create / update its permission sets, groups and assignments
 ```
 
 `ACCOUNT` picks the config and the aws-vault profile (`PROFILE_<account>` in the
 Makefile). Run `gh auth status` right before a plan or apply: the trust policies are
 rendered from each repository's OIDC subject setting, which the tool reads with `gh`,
 and `make github-oidc` refuses to go on when it cannot.
+
+## First, once per organisation: Identity Center
+
+People sign in to every account through IAM Identity Center, which lives in the
+organisation's management account. `make sso-plan` and `make sso-apply` run the tool's
+`identity-center.sh` there, under the management profile (`PROFILE_management` in the
+Makefile, from `MANAGEMENT_PROFILE`): the permission sets, the groups and which group
+gets which permission set in which account. The group files name accounts by their name
+in AWS Organizations or by OU (`Workloads/NonProd`, `Workloads/Prod`), so the accounts
+and OUs must exist first. Re-running changes nothing that already matches; it never
+deletes or removes anything. The management account gets no deploy roles and no config
+here, and these targets are a human's, never CI's.
 
 ## First time in an account
 

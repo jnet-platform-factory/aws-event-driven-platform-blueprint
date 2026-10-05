@@ -29,7 +29,8 @@ event bus, delivery to OpenSearch through Firehose, and an SQS → SNS error dig
 Before the first change set, replace every `CHANGEME` in both records:
 
 - `OpenSearchEndpoint` and `OpenSearchResourceArn` — the domain events are sent to.
-  A domain in another account must allow this stack's forwarder role.
+  A domain in another account must allow this stack's Firehose delivery role, which
+  only exists after the first deploy — see _The first deploy takes two_ below.
 - `AlertEmail` — where the error digest goes.
 
 `EventBusName` names the bus `infrastructure/` creates (`__PREFIX__-events-<stage>`).
@@ -50,8 +51,25 @@ a pull request creates a change set in each stage and deletes it again, so its e
 is in the run summary; a merge to `main` creates them again and waits for the
 `eo-<stage>` reviewer to execute each one.
 
-Any Remove or Replacement fails the change set unless `ALLOW_DESTRUCTIVE=1` is set
-deliberately.
+Any Remove, or a Replacement that is True or Conditional, fails the change set unless
+`ALLOW_DESTRUCTIVE=1` is set deliberately.
+
+### The first deploy takes two
+
+Both records start with `FirehoseStreamEnabled=false`. A domain whose access policy
+names principals — every domain in another account — rejects a Firehose delivery
+role it does not know, and that role is created by this stack: so Firehose cannot
+create the stream on the first deploy, and the update rolls back. In each stage:
+
+1. **Deploy with the stream off** (as committed): the stack, its rule and its roles.
+2. **Grant the stack's `FirehoseDeliveryRoleArn` output on the domain** (read and
+   write; the domain's account does this). A policy naming a role that does not exist
+   yet is rejected, about half an hour later — so always deploy first, grant second.
+3. **Set `FirehoseStreamEnabled` to `true`** in the stage's record, in a reviewed pull
+   request, and deploy again.
+
+When the domain is in this account and its policy names no principals, step 2 is not
+needed; set `true` from the start.
 
 ## Moving the pin
 

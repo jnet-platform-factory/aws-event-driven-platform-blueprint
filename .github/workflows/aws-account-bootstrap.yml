@@ -48,7 +48,7 @@ jobs:
     name: Pin, configs, scripts (no AWS)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-tools
         with:
           lint: "true"
@@ -60,8 +60,9 @@ jobs:
   plan:
     name: Plan ${{ matrix.account }}
     needs: [static]
-    # The blueprint itself deploys nothing: only a repository rendered from it does.
-    if: github.repository != 'jnet-platform-factory/platform-blueprint'
+    # Only this repository deploys: in the blueprint the name is still a token, so it
+    # never matches, and neither does a fork or a copy.
+    if: github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__'
     runs-on: ubuntu-latest
     environment: bootstrap-${{ matrix.account }}-plan
     permissions:
@@ -77,9 +78,9 @@ jobs:
       # policies are rendered from it, and make github-oidc refuses to go on without it.
       GH_TOKEN: ${{ secrets.CICD_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ fromJSON(env.ACCOUNT_IDS)[matrix.account] }}:role/__PREFIX__-platform-bootstrap-readonly
           aws-region: ${{ env.AWS_REGION }}
@@ -124,9 +125,9 @@ jobs:
       ACCOUNT: ${{ inputs.account }}
       GH_TOKEN: ${{ secrets.CICD_ACCESS_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ fromJSON(env.ACCOUNT_IDS)[inputs.account] }}:role/__PREFIX__-platform-bootstrap-apply
           aws-region: ${{ env.AWS_REGION }}

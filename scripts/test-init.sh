@@ -9,8 +9,9 @@
 #
 # For each: bin/init succeeds and leaves no token; the blueprint-only files are
 # gone; `make check` passes; `make ready` fails while CHANGEME is left and passes
-# once it is filled in; and (full) Terragrunt evaluates every dependency-free unit
-# from its path — account, region and component — without AWS.
+# once it is filled in; every AWS job is guarded to the rendered repository; and
+# (full) Terragrunt evaluates every dependency-free unit from its path — account,
+# region and component — without AWS.
 
 set -euo pipefail
 
@@ -44,6 +45,20 @@ expect_ready_after_filling() {  # <dir>
   (cd "${dir}" && make ready) || fail "make ready still fails after filling in"
 }
 
+# The blueprint itself: every job that reaches AWS is guarded by a token, so it
+# never runs here, and no guard names a repository by hand.
+echo "== blueprint guards"
+if grep -rn "github.repository !=" "${root}/.github/workflows"; then fail "a workflow guards by excluding a name"; fi
+grep -rq "github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__'" "${root}/.github/workflows" ||
+  fail "no workflow has the rendered repository guard"
+
+expect_guarded() {  # <dir> <org/repo>: every repository guard in the rendered workflows names it
+  local dir="$1" repo="$2" guards
+  guards="$(grep -rhoE "github.repository == '[^']*'" "${dir}/.github/workflows" | sort -u)"
+  [[ "${guards}" == "github.repository == '${repo}'" ]] ||
+    fail "$(basename "${dir}"): the workflows' guards are not all ${repo}: ${guards}"
+}
+
 common=(
   'TENANT="Acme Freight"' 'PREFIX="acme"' 'GITHUB_ORG="acme-org"' 'PLATFORM_REPO="acme-platform"'
   'GITHUB_ORG_ID="1001"' 'PLATFORM_REPO_ID="2002"'
@@ -53,11 +68,20 @@ common=(
 
 # --- full ------------------------------------------------------------------------
 echo "== full: every component, two regions"
-render full "${common[@]}" 'APP_REPOS="acme-api acme-web"' 'PRIMARY_REGION="us-west-2"' 'EO_REGION="us-east-1"'
+render full "${common[@]}" 'APP_REPOS="acme-api acme-web"' 'PRIMARY_REGION="us-west-2"' 'EO_REGION="us-east-1"' \
+  'MANAGEMENT_PROFILE="acme-management"'
 full="${RENDERED}"
 
-for gone in bin/init init.env.example LICENSE scripts/leak-check.py scripts/test-init.sh .github/workflows/blueprint.yml README.tenant.md; do
+for gone in bin/init init.env.example LICENSE scripts/leak-check.py scripts/test-init.sh .github/workflows/blueprint.yml README.tenant.md CLAUDE.tenant.md; do
   [[ ! -e "${full}/${gone}" ]] || fail "full: ${gone} survived init"
+done
+[[ -f "${full}/CLAUDE.md" && "$(readlink "${full}/AGENTS.md")" == CLAUDE.md ]] || fail "full: no CLAUDE.md, or AGENTS.md is not a link to it"
+grep -q 'Infrastructure and the SSM bridge' "${full}/CLAUDE.md" || fail "full: CLAUDE.md lost its infrastructure section"
+expect_guarded "${full}" acme-org/acme-platform
+grep -q '^PROFILE_management := acme-management$' "${full}/aws-account-bootstrap/Makefile" || fail "full: the management profile"
+grep -q 'sso-plan' "${full}/README.md" || fail "full: README.md has no Identity Center step"
+for d in /platform-api/src /lambda-layers/base-layer/layer; do
+  grep -q "directory: \"${d}\"" "${full}/.github/dependabot.yml" || fail "full: dependabot.yml has no ${d}"
 done
 grep -q 'blueprint-only' "${full}/Makefile" && fail "full: the Makefile kept its blueprint-only targets"
 grep -q '^APP_REPOS="acme-platform acme-api acme-web"$' "${full}/aws-account-bootstrap/configs/dev.env" ||
@@ -102,6 +126,13 @@ for gone in infrastructure platform-api lambda-layers aws-daily-monitoring-repor
   [[ ! -e "${minimal}/${gone}" ]] || fail "minimal: ${gone} survived init"
 done
 grep -q 'EventsObservability=true' "${minimal}/aws-account-bootstrap/Makefile" || fail "minimal: the eo CI roles are off"
+expect_guarded "${minimal}" acme-org/acme-platform
+grep -q 'platform-api\|lambda-layers' "${minimal}/.github/dependabot.yml" && fail "minimal: dependabot.yml kept a removed component"
+grep -q 'Infrastructure and the SSM bridge' "${minimal}/CLAUDE.md" && fail "minimal: CLAUDE.md kept the infrastructure section"
+# No management profile: no Identity Center step, and the targets refuse before any AWS.
+grep -q 'sso-plan' "${minimal}/README.md" && fail "minimal: README.md has an Identity Center step without a profile"
+out="$(make -C "${minimal}/aws-account-bootstrap" sso-plan 2>&1)" && fail "minimal: sso-plan ran without a management profile"
+grep -q 'no management account profile' <<<"${out}" || fail "minimal: sso-plan did not say why it refused: ${out}"
 grep -q '^ALLOWED_REGIONS="eu-west-1"$' "${minimal}/aws-account-bootstrap/configs/dev.env" || fail "minimal: ALLOWED_REGIONS"
 
 (cd "${minimal}" && make check PYTHON="${PYTHON}") || fail "minimal: make check"
@@ -122,6 +153,7 @@ refuse "one account for both environments" "${common[@]/444455556666/11112222333
 refuse "platform-api without infrastructure" "${common[@]}" 'PRIMARY_REGION="us-east-1"' \
   'COMPONENTS="aws-account-bootstrap platform-api"'
 refuse "a bad region" "${common[@]}" 'PRIMARY_REGION="us-east"'
+refuse "a bad management profile" "${common[@]}" 'PRIMARY_REGION="us-east-1"' 'MANAGEMENT_PROFILE="acme management"'
 
 echo
 echo "test-init: ok"

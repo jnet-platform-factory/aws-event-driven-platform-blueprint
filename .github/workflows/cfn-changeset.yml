@@ -80,13 +80,25 @@ jobs:
       CHANGE_SET: ci-${{ github.run_id }}-${{ github.run_attempt }}
       DESCRIPTION: ${{ github.event_name == 'pull_request' && format('PR {0} at {1}', github.event.number, github.event.pull_request.head.sha) || format('{0} at {1}', github.ref_name, github.sha) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-tools
         with:
           sam: ${{ inputs.sam }}
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      # An empty role makes configure-aws-credentials fail with a message about
+      # OIDC; say what is actually missing.
+      - name: Check the deploy role
+        env:
+          ROLE_ARN: ${{ inputs.changeset_role_arn || vars.AWS_APP_ROLE_ARN }}
+          ENVIRONMENT: ${{ inputs.plan_environment }}
+        run: |
+          [[ -n "$ROLE_ARN" ]] || {
+            echo "::error::No deploy role in the '$ENVIRONMENT' environment: apply aws-account-bootstrap (or ci-roles) to this account first; it sets AWS_APP_ROLE_ARN"
+            exit 1
+          }
+
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ inputs.changeset_role_arn || vars.AWS_APP_ROLE_ARN }}
           aws-region: ${{ inputs.region }}
@@ -115,9 +127,21 @@ jobs:
     env:
       CHANGE_SET: ${{ needs.changeset.outputs.change_set }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      # An empty role makes configure-aws-credentials fail with a message about
+      # OIDC; say what is actually missing.
+      - name: Check the deploy role
+        env:
+          ROLE_ARN: ${{ inputs.execute_role_arn || vars.AWS_APP_ROLE_ARN }}
+          ENVIRONMENT: ${{ inputs.execute_environment }}
+        run: |
+          [[ -n "$ROLE_ARN" ]] || {
+            echo "::error::No deploy role in the '$ENVIRONMENT' environment: apply aws-account-bootstrap (or ci-roles) to this account first; it sets AWS_APP_ROLE_ARN"
+            exit 1
+          }
+
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ inputs.execute_role_arn || vars.AWS_APP_ROLE_ARN }}
           aws-region: ${{ inputs.region }}

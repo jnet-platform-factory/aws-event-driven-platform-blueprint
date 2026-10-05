@@ -120,7 +120,7 @@
   <!-- tenant platform repo -->
   <use href="#octo" x="190" y="760"/>
   <text x="190" y="860" font-size="18" font-weight="700" fill="#232F3E" text-anchor="middle">tenant platform repo</text>
-  <text x="190" y="883" font-size="14" fill="#545B64" text-anchor="middle">one per tenant, rendered from platform-blueprint</text>
+  <text x="190" y="883" font-size="14" fill="#545B64" text-anchor="middle">one per tenant, rendered from the blueprint</text>
   <rect x="140" y="895" width="100" height="24" rx="12" fill="#8C4FFF"/>
   <text x="190" y="912" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">PRIVATE</text>
   <text x="190" y="945" font-size="14" fill="#545B64" text-anchor="middle">deployments/&lt;stage&gt;.json</text>

@@ -10,7 +10,8 @@
 #   3. removes the components not in COMPONENTS, with their workflows;
 #   4. replaces every __TOKEN__ in every text file, and in directory names;
 #   5. removes what only the blueprint needs (this script, its tests, the leak
-#      gate, the blueprint README) and puts README.tenant.md in README.md's place.
+#      gate, the blueprint README), puts README.tenant.md in README.md's place,
+#      and CLAUDE.tenant.md in CLAUDE.md's (AGENTS.md links to it).
 #
 # What is left to fill in is marked CHANGEME; `make ready` lists it.
 
@@ -33,7 +34,7 @@ done < <(grep -E '^[A-Z_]+=' "${answers}")
 ALL_COMPONENTS="aws-account-bootstrap infrastructure events-observability aws-daily-monitoring-report ssm-parameters platform-api lambda-layers"
 : "${TENANT:=}" "${PREFIX:=}" "${GITHUB_ORG:=}" "${PLATFORM_REPO:=}" "${PRIMARY_REGION:=}"
 : "${DEV_ACCOUNT_ID:=}" "${PRODUCTION_ACCOUNT_ID:=}" "${APP_REPOS:=}" "${GITHUB_ORG_ID:=}" "${PLATFORM_REPO_ID:=}"
-: "${SAR_PUBLISHER_ACCOUNT_ID:=}"
+: "${SAR_PUBLISHER_ACCOUNT_ID:=}" "${MANAGEMENT_PROFILE:=}"
 : "${DEV_PROFILE:=${PREFIX}-dev}" "${PRODUCTION_PROFILE:=${PREFIX}-production}"
 : "${EO_REGION:=${PRIMARY_REGION}}" "${COMPONENTS:=${ALL_COMPONENTS}}"
 
@@ -51,6 +52,7 @@ want DEV_ACCOUNT_ID "${DEV_ACCOUNT_ID}" '^[0-9]{12}$' "12 digits"
 want PRODUCTION_ACCOUNT_ID "${PRODUCTION_ACCOUNT_ID}" '^[0-9]{12}$' "12 digits"
 want DEV_PROFILE "${DEV_PROFILE}" '^[A-Za-z0-9._-]+$' "an aws-vault profile name"
 want PRODUCTION_PROFILE "${PRODUCTION_PROFILE}" '^[A-Za-z0-9._-]+$' "an aws-vault profile name"
+want MANAGEMENT_PROFILE "${MANAGEMENT_PROFILE}" '^([A-Za-z0-9._-]+)?$' "an aws-vault profile name, or empty"
 [[ "${DEV_ACCOUNT_ID}" != "${PRODUCTION_ACCOUNT_ID}" ]] ||
   problems+=("DEV_ACCOUNT_ID and PRODUCTION_ACCOUNT_ID are the same: every environment needs its own account")
 
@@ -97,14 +99,24 @@ workflows_of() {
     *) echo "$1" ;;
   esac
 }
+drop_block() {  # drop_block <file> <start regex> <end regex>: delete the lines between, inclusive
+  sed -i.bak "/$2/,/$3/d" "$1" && rm -f "$1.bak"
+}
 for c in ${ALL_COMPONENTS}; do
   selected "${c}" && continue
   rm -rf "${c}" ".github/workflows/$(workflows_of "${c}").yml"
+  # Its Dependabot entry, if it has one.
+  drop_block .github/dependabot.yml "^  # >>> ${c}\$" "^  # <<< ${c}\$"
   echo "removed ${c}"
 done
 if ! selected infrastructure; then
-  # The rendered README's infrastructure steps go with it.
-  sed -i.bak '/<!-- infrastructure -->/,/<!-- \/infrastructure -->/d' README.tenant.md && rm -f README.tenant.md.bak
+  # The rendered READMEs' infrastructure steps go with it.
+  drop_block README.tenant.md '<!-- infrastructure -->' '<!-- \/infrastructure -->'
+  drop_block CLAUDE.tenant.md '<!-- infrastructure -->' '<!-- \/infrastructure -->'
+fi
+if [[ -z "${MANAGEMENT_PROFILE}" ]]; then
+  # Someone else runs Identity Center for this organisation.
+  drop_block README.tenant.md '<!-- management -->' '<!-- \/management -->'
 fi
 
 # --- 4. Replace every token --------------------------------------------------------
@@ -115,6 +127,7 @@ tokens=(
   "DEV_ACCOUNT_ID=${DEV_ACCOUNT_ID}" "DEV_PROFILE=${DEV_PROFILE}"
   "PRODUCTION_ACCOUNT_ID=${PRODUCTION_ACCOUNT_ID}" "PRODUCTION_PROFILE=${PRODUCTION_PROFILE}"
   "SAR_PUBLISHER_ACCOUNT_ID=${SAR_PUBLISHER_ACCOUNT_ID}" "EVENTS_OBSERVABILITY=${EVENTS_OBSERVABILITY}"
+  "MANAGEMENT_PROFILE=${MANAGEMENT_PROFILE}"
   "COMPONENTS=$(echo "${COMPONENTS}" | xargs)"
 )
 script=""
@@ -140,6 +153,8 @@ done < <(find . -type f -not -path './.git/*' -not -path '*/.tool/*' -not -path 
 
 # --- 5. Leave a tenant repository --------------------------------------------------
 mv README.tenant.md README.md
+mv CLAUDE.tenant.md CLAUDE.md
+ln -s CLAUDE.md AGENTS.md
 rm -f init.env.example LICENSE scripts/leak-check.py scripts/test-init.sh .github/workflows/blueprint.yml
 # The blueprint-only targets of the root Makefile.
 sed -i.bak '/^# >>> blueprint-only/,/^# <<< blueprint-only/d' Makefile && rm -f Makefile.bak
