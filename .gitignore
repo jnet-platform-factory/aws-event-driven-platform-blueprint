@@ -21,10 +21,15 @@ __pycache__/
 .venv/
 # Lambda layer artefacts
 *.zip
-# Editors / OS
+# Editors / OS / tools
 .DS_Store
 .idea/
 .vscode/
+.history/
+node_modules/
+# Claude Code: per-person worktrees and settings (shared .claude/ files are fine)
+.claude/worktrees/
+.claude/settings.local.json
 # The answers bin/init reads: they name your accounts. Never commit.
 init.env
 # Optional extra deny-list for scripts/leak-check.py. Never commit it: it names

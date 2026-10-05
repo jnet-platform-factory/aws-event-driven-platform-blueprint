@@ -41,7 +41,7 @@ jobs:
     name: Check (no AWS)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-tools
         with:
           terraform: "true"
@@ -50,8 +50,9 @@ jobs:
   dev:
     name: dev ${{ github.event_name == 'push' && 'apply' || 'plan' }}
     needs: [check]
-    # The blueprint itself deploys nothing: only a repository rendered from it does.
-    if: github.repository != 'jnet-platform-factory/platform-blueprint' && github.event_name != 'workflow_dispatch'
+    # Only this repository deploys: in the blueprint the name is still a token, so it
+    # never matches, and neither does a fork or a copy.
+    if: github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: dev
     permissions:
@@ -61,11 +62,11 @@ jobs:
       group: infrastructure-dev
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-tools
         with:
           terraform: "true"
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -76,7 +77,7 @@ jobs:
   production-plan:
     name: production plan
     needs: [dev]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository != 'jnet-platform-factory/platform-blueprint'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__'
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -86,11 +87,11 @@ jobs:
       group: infrastructure-production
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-tools
         with:
           terraform: "true"
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -109,11 +110,11 @@ jobs:
       group: infrastructure-production
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-tools
         with:
           terraform: "true"
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -122,7 +123,7 @@ jobs:
   dispatch:
     name: ${{ inputs.environment }} ${{ inputs.command }}
     needs: [check]
-    if: github.event_name == 'workflow_dispatch' && github.repository != 'jnet-platform-factory/platform-blueprint' && (inputs.command == 'plan' || github.ref == 'refs/heads/main')
+    if: github.event_name == 'workflow_dispatch' && github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__' && (inputs.command == 'plan' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     permissions:
@@ -132,11 +133,11 @@ jobs:
       group: infrastructure-${{ inputs.environment }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-tools
         with:
           terraform: "true"
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_PLATFORM_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}

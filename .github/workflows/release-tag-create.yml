@@ -27,13 +27,13 @@ jobs:
       previous_tag: ${{ steps.tag_version.outputs.previous_tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Bump version and push tag
         id: tag_version
-        uses: mathieudutour/github-tag-action@v6.2
+        uses: mathieudutour/github-tag-action@v7
         with:
           github_token: ${{ secrets.CICD_ACCESS_TOKEN }}
           default_bump: ${{ github.event.inputs.bump_type }}

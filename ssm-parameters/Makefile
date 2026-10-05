@@ -14,13 +14,16 @@ SHELL := /bin/bash
 ENVS := dev production
 ENV  ?=
 
-PROFILE_dev        := __DEV_PROFILE__
-PROFILE_production := __PRODUCTION_PROFILE__
-REGION             := __PRIMARY_REGION__
+PROFILE_dev           := __DEV_PROFILE__
+PROFILE_production    := __PRODUCTION_PROFILE__
+ACCOUNT_ID_dev        := __DEV_ACCOUNT_ID__
+ACCOUNT_ID_production := __PRODUCTION_ACCOUNT_ID__
+REGION                := __PRIMARY_REGION__
 
 PROFILE := $(if $(CI),,$(PROFILE_$(ENV)))
 VAULT   := $(if $(PROFILE),aws-vault exec $(PROFILE) --,)
-RUN     := $(VAULT) bin/ssm-put-parameters --environment $(ENV) --region $(REGION)
+# --account-id: the script refuses to touch anything in another account.
+RUN     := $(VAULT) bin/ssm-put-parameters --environment $(ENV) --region $(REGION) --account-id $(ACCOUNT_ID_$(ENV))
 
 .DEFAULT_GOAL := help
 .PHONY: help check ready plan apply _env

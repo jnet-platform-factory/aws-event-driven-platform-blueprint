@@ -16,7 +16,12 @@ values may legitimately start with a dash or span multiple lines (PEM keys,
 service-account JSON) and argv-passing mangles both.
 
 Requires the `aws` CLI on PATH with credentials already configured — on the
-runner that is what aws-actions/configure-aws-credentials leaves behind.
+runner that is what aws-actions/configure-aws-credentials leaves behind. With
+--account-id (the Makefile always passes the environment's account) nothing is
+read or written unless those credentials are for that account.
+
+Under GitHub Actions it writes changed, current and errors (counts) to
+$GITHUB_OUTPUT, for the workflow's summary.
 """
 
 from __future__ import annotations
@@ -129,6 +134,25 @@ def put(name: str, value: str, type_: str, description: str | None, region: str)
     return None
 
 
+def confirm_account(expected: str, region: str) -> str | None:
+    """Return an error unless the credentials are for the expected account."""
+    rc, out, err = aws(["sts", "get-caller-identity", "--query", "Account", "--output", "text"], region)
+    if rc != 0:
+        reason = err.strip().splitlines()[-1] if err.strip() else f"exit {rc}"
+        return f"cannot read the credentials' account: {reason}"
+    if out.strip() != expected:
+        # Neither account id is printed: the log is readable by anyone with repo access.
+        return "the credentials are for another account than this environment's"
+    return None
+
+
+def output(key: str, value: object) -> None:
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"{key}={value}\n")
+
+
 def resolve(entry: dict, environment: str) -> tuple[str, str, str, str | None]:
     """Validate one manifest entry and resolve it. Raises ValueError."""
     name = entry.get("name")
@@ -208,6 +232,10 @@ def main() -> int:
         help=f"defaults to {MANIFEST.relative_to(REPO_ROOT)}",
     )
     parser.add_argument(
+        "--account-id",
+        help="refuse to read or write unless the credentials are for this account",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="validate the manifest only: no AWS, no values read",
@@ -222,9 +250,18 @@ def main() -> int:
         parser.error("--region is required when $AWS_REGION is unset")
     entries = manifest.get("parameters", [])
 
+    if args.account_id:
+        account_err = confirm_account(args.account_id, args.region)
+        if account_err:
+            log(f"::error::{account_err}; nothing read or written.")
+            output("errors", 1)
+            return 1
+
     mode = "DRY RUN — nothing will be written" if args.dry_run else "APPLYING"
     log(f"{mode} · environment={args.environment} · region={args.region}")
-    log(f"{len(entries)} parameter(s) declared in {args.manifest.relative_to(REPO_ROOT)}\n")
+    manifest_path = args.manifest.resolve()
+    shown = manifest_path.relative_to(REPO_ROOT) if manifest_path.is_relative_to(REPO_ROOT) else manifest_path
+    log(f"{len(entries)} parameter(s) declared in {shown}\n")
 
     results: list[tuple[str, str, str]] = []  # (name, status, detail)
     failed = False
@@ -301,6 +338,9 @@ def main() -> int:
             handle.write("\n".join(lines) + "\n")
 
     changed = sum(1 for _, s, _ in results if s in (CREATE, UPDATE))
+    output("changed", changed)
+    output("current", sum(1 for _, s, _ in results if s == NO_CHANGE))
+    output("errors", sum(1 for _, s, _ in results if s in (ERROR, TYPE_DRIFT)))
     log(
         f"\n{changed} parameter(s) "
         f"{'would change' if args.dry_run else 'changed'}, "

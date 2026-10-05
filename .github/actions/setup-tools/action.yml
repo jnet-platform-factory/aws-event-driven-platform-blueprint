@@ -20,7 +20,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@v7
       with:
         python-version: "3.13"
 
@@ -36,12 +36,12 @@ runs:
         python -m pip install --quiet "${args[@]}"
 
     - if: inputs.sam == 'true'
-      uses: aws-actions/setup-sam@v2
+      uses: aws-actions/setup-sam@v3
       with:
         use-installer: true
 
     - if: inputs.terraform == 'true'
-      uses: hashicorp/setup-terraform@v3
+      uses: hashicorp/setup-terraform@v4
       with:
         terraform_version: "1.13.0"
         terraform_wrapper: false

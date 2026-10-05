@@ -36,12 +36,13 @@ jobs:
     name: Check (no AWS)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: make -C events-observability check
 
   dev:
-    # The blueprint itself deploys nothing: only a repository rendered from it does.
-    if: github.repository != 'jnet-platform-factory/platform-blueprint'
+    # Only this repository deploys: in the blueprint the name is still a token, so it
+    # never matches, and neither does a fork or a copy.
+    if: github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__'
     needs: [check]
     permissions:
       contents: read
@@ -59,7 +60,7 @@ jobs:
       sam: false
 
   production:
-    if: github.repository != 'jnet-platform-factory/platform-blueprint'
+    if: github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__'
     needs: [check]
     permissions:
       contents: read

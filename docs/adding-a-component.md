@@ -22,9 +22,10 @@ in the blueprint, or in one tenant's repository — is added the same way.
    - for a stack, `dev` and `production` jobs that call
      [cfn-changeset.yml](../.github/workflows/cfn-changeset.yml), the `production` one only on
      `main`;
-   - the repository guard on every job that reaches AWS
-     (`github.repository != 'jnet-platform-factory/platform-blueprint'`), so the
-     blueprint itself never deploys;
+   - the repository guard on every job that reaches AWS,
+     `github.repository == '__GITHUB_ORG__/__PLATFORM_REPO__'`: in the blueprint the name
+     is still a token, so the blueprint (and any fork or copy of a tenant repository)
+     never deploys;
    - a `summary` job through the shared job-summary action, with `permissions: {}`.
 3. **Credentials** from the bootstrap: `AWS_APP_ROLE_ARN` for stacks,
    `AWS_PLATFORM_ROLE_ARN` for Terraform and SSM. A component that needs more than those
@@ -40,10 +41,14 @@ Also:
 
 - add the directory to `ALL_COMPONENTS` in [bin/init](../bin/init), and its workflow to
   `workflows_of` if the names differ;
+- if it has Python requirements, give it a pip entry in
+  [.github/dependabot.yml](../.github/dependabot.yml) between `# >>> <component>` and
+  `# <<< <component>`, so `bin/init` removes the entry with the component;
 - use only the identity tokens `bin/init` knows (its `tokens` list) and `CHANGEME`
   for values a tenant chooses — `make test-init` fails on any other token;
 - add it to the component table in [README.md](../README.md) and the pipelines table in
-  [README.tenant.md](../README.tenant.md).
+  [README.tenant.md](../README.tenant.md); if it changes how things deploy, say so in
+  [CLAUDE.tenant.md](../CLAUDE.tenant.md) too.
 
 `make test-init` renders every component, so the new one is checked in a rendered
 repository on every pull request.

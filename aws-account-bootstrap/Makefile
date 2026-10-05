@@ -6,6 +6,8 @@
 #   make diff  ACCOUNT=dev        rendered documents against live IAM; exit 1 on drift
 #   make apply ACCOUNT=dev        create / update the roles: CI behind a reviewer, or a human
 #   make ci-roles ACCOUNT=dev     deploy ci-roles/ (the roles CI assumes): a human, never CI
+#   make sso-plan                 IAM Identity Center, in the management account (read-only)
+#   make sso-apply                create / update its permission sets, groups and assignments
 #
 # The tool itself lives in jnet-platform-factory/aws-account-bootstrap. This file
 # only pins it and points it at configs/<ACCOUNT>.env: no tool code is copied here.
@@ -21,8 +23,8 @@
 SHELL := /bin/bash
 
 TOOL_REPO := https://github.com/jnet-platform-factory/aws-account-bootstrap.git
-TOOL_TAG  := v0.0.3
-TOOL_REF  := 9c5943fc3a9a9130783817eba3320332d4135b11
+TOOL_TAG  := v0.0.5
+TOOL_REF  := 605b0ca8b8d0f45ed8461527d63a90e6524fd368
 TOOL_DIR  := $(CURDIR)/.tool/$(TOOL_REF)
 
 ACCOUNTS := dev production
@@ -34,6 +36,10 @@ YES      ?=
 # account's bootstrap ci-role through OIDC.
 PROFILE_dev        := __DEV_PROFILE__
 PROFILE_production := __PRODUCTION_PROFILE__
+# The organisation's management account, where IAM Identity Center lives. It gets
+# no deploy roles and no config here: only the sso-* targets run in it. Empty when
+# someone else administers Identity Center for this organisation.
+PROFILE_management := __MANAGEMENT_PROFILE__
 PROFILE  := $(if $(CI),,$(PROFILE_$(ACCOUNT)))
 CONFIG   := $(CURDIR)/configs/$(ACCOUNT).env
 AWS_EXEC := $(if $(PROFILE),aws-vault exec $(PROFILE) --,)
@@ -65,7 +71,7 @@ CI_ROLES_PARAMS := Account=$(ACCOUNT) Prefix=__PREFIX__ \
                    SarPublisherAccountId=__SAR_PUBLISHER_ACCOUNT_ID__
 
 .DEFAULT_GOAL := help
-.PHONY: help check fetch plan analyze diff apply github-oidc ci-roles verify-pin same-account ready clean _account _applicable
+.PHONY: help check fetch plan analyze diff apply github-oidc ci-roles sso-plan sso-apply verify-pin same-account ready clean _account _applicable _management
 
 help: ## Show this help
 	@echo "Usage: make <target> ACCOUNT=<account>    accounts: $(ACCOUNTS)"
@@ -142,6 +148,16 @@ ci-roles: _account ready ## Deploy ci-roles/template.yaml into the account (a hu
 	  --template-file ci-roles/template.yaml --capabilities CAPABILITY_NAMED_IAM \
 	  --parameter-overrides $(CI_ROLES_PARAMS) --no-fail-on-empty-changeset
 
+# IAM Identity Center: the permission sets people sign in with, their groups, and
+# which group gets which permission set in which account — the tool's
+# identity-center/ files, at TOOL_REF. Once per organisation, before the other
+# accounts are bootstrapped; a human, never CI.
+sso-plan: _management ready fetch ## Show the IAM Identity Center plan (management account); changes nothing
+	@$(MAKE) --no-print-directory -C $(TOOL_DIR) sso-plan PROFILE=$(PROFILE_management)
+
+sso-apply: _management ready fetch ## Create or update the Identity Center permission sets, groups and assignments
+	@$(MAKE) --no-print-directory -C $(TOOL_DIR) sso-apply PROFILE=$(PROFILE_management) $(if $(YES),YES=1,)
+
 clean: ## Remove the fetched tool
 	rm -rf .tool
 
@@ -149,6 +165,11 @@ _account:
 	@case " $(ACCOUNTS) " in *" $(ACCOUNT) "*) ;; \
 	  *) echo "ACCOUNT must be one of: $(ACCOUNTS)"; exit 1 ;; esac
 	@[ -f "$(CONFIG)" ] || { echo "$(CONFIG) not found"; exit 1; }
+
+_management:
+	@[ -z "$(CI)" ] || { echo "Identity Center is changed by a human, never CI"; exit 1; }
+	@[ -n "$(PROFILE_management)" ] || \
+	  { echo "no management account profile: set MANAGEMENT_PROFILE in init.env, or PROFILE_management here"; exit 1; }
 
 _applicable:
 	@case " $(NO_APPLY) " in *" $(ACCOUNT) "*) \

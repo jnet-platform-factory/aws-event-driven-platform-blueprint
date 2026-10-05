@@ -18,7 +18,10 @@ Description: >
 # platform-api, the base layer, the daily monitoring report) uses the roles the
 # bootstrap itself creates, through the dev / production GitHub environments.
 # events-observability is the exception: its template comes from the Serverless
-# Application Repository, which the bootstrap's app role cannot read.
+# Application Repository. Since aws-account-bootstrap v0.0.5 the app role can read
+# SAR templates too, but it can also execute what it creates; these roles keep the
+# change set (PR, any branch) and its execution (main, behind reviewers) apart, so
+# they stay until that separation is decided another way.
 
 Parameters:
   Account:
