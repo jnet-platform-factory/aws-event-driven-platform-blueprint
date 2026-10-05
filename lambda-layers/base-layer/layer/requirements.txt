@@ -1,6 +1,6 @@
 # The base layer's libraries, pinned. boto3 and botocore are in the Lambda
 # runtime already; do not add them here.
-aws-lambda-powertools[all]==3.21.0
+aws-lambda-powertools[all]==3.35.0
 pydantic==2.12.5
 PyJWT==2.15.0
 requests==2.33.0
