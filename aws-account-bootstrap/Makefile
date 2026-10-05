@@ -23,8 +23,8 @@
 SHELL := /bin/bash
 
 TOOL_REPO := https://github.com/jnet-platform-factory/aws-account-bootstrap.git
-TOOL_TAG  := v0.0.5
-TOOL_REF  := 605b0ca8b8d0f45ed8461527d63a90e6524fd368
+TOOL_TAG  := v0.0.6
+TOOL_REF  := 5d684ff1768c33eea34786735dce16fa41372f26
 TOOL_DIR  := $(CURDIR)/.tool/$(TOOL_REF)
 
 ACCOUNTS := dev production
